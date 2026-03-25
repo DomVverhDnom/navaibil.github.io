@@ -1,0 +1,27 @@
+Краткий чеклист продакшена (без «опциональных» вещей из общей памятки)
+
+1) На сервере: Node 20+, git clone / копия проекта, npm ci
+
+2) Файл .env (не в git):
+   - JWT_SECRET — случайная строка ≥ 32 символов
+   - CORS_ORIGINS — https://ваш-домен.ru (через запятую, если несколько)
+   - TRUST_PROXY=1 — если перед приложением nginx/Caddy
+   - HOST=127.0.0.1 и PORT=3000 — если наружу только nginx (рекомендуется)
+   - ADMIN_EMAILS — при необходимости
+
+3) Сборка и запуск одним процессом (Node отдаёт и API, и dist):
+   npm run build
+   npm run start:prod
+   Либо: pm2 start ecosystem.config.cjs --env production
+
+4) HTTPS: nginx по примеру deploy/nginx-vibetelegram.conf.example + Let's Encrypt (certbot).
+
+5) Резервные копии SQLite по расписанию (cron / планировщик):
+   Linux: bash deploy/scripts/backup-sqlite.sh
+   Windows: powershell -File deploy/scripts/backup-sqlite.ps1
+
+6) Один домен для сайта — в CORS_ORIGINS укажите тот же https://...
+   VITE_API_URL при сборке не нужен, если фронт и API с одного хоста.
+
+Домен покупать не обязательно для экспериментов (можно IP или бесплатный поддомен у хостера),
+но для нормального HTTPS и доверия пользователей нужен свой домен + VPS (Timeweb, Selectel, Hetzner и т.д.).

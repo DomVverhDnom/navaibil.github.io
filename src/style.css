@@ -1,0 +1,220 @@
+:root {
+  --tg-bg: #0a0a0b;
+  --tg-surface: #141415;
+  --tg-elevated: #1e1e20;
+  --tg-border: rgba(255, 255, 255, 0.07);
+  --tg-text: #f2f3f5;
+  --tg-muted: #8b8f98;
+  /* Акцент — голубой в духе Telegram Desktop */
+  --tg-accent-hi: #9fd4ff;
+  --tg-accent: #3390ec;
+  --tg-accent-mid: #2481cc;
+  --tg-accent-deep: #1a6bb5;
+  --tg-on-accent: #ffffff;
+  --tg-accent-soft: rgba(51, 144, 236, 0.12);
+  --tg-accent-line: rgba(51, 144, 236, 0.22);
+  /* Совместимость: старые имена = акцент */
+  --tg-gold: var(--tg-accent);
+  --tg-gold-mid: var(--tg-accent-mid);
+  --tg-gold-deep: var(--tg-accent-deep);
+  --tg-glow: rgba(51, 144, 236, 0.38);
+  --tg-gradient-primary: linear-gradient(
+    135deg,
+    var(--tg-accent-hi) 0%,
+    var(--tg-accent) 42%,
+    var(--tg-accent-mid) 100%
+  );
+  --tg-gradient-primary-strong: linear-gradient(
+    135deg,
+    var(--tg-accent-hi) 0%,
+    var(--tg-accent) 48%,
+    var(--tg-accent-deep) 100%
+  );
+  --tg-radius-lg: 20px;
+  --tg-radius-md: 14px;
+  --tg-radius-sm: 10px;
+  --layout-max: 1180px;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow-y: scroll;
+  font-family: var(--font);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+}
+
+.gold-gradient-text {
+  background: linear-gradient(
+    135deg,
+    #d4ecff 0%,
+    var(--tg-accent) 38%,
+    var(--tg-accent-mid) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gold-gradient-fill {
+  background: var(--tg-gradient-primary-strong);
+}
+
+.premium-glow {
+  box-shadow:
+    0 0 0 1px var(--tg-accent-line),
+    0 8px 40px -12px var(--tg-glow);
+}
+
+/* Стилизованный выбор файла: label + прозрачный input на всю площадь */
+.tg-file-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  min-height: 42px;
+  border-radius: var(--tg-radius-md);
+  font-weight: 600;
+  font-size: 0.88rem;
+  line-height: 1.2;
+  border: 1px solid var(--tg-border);
+  background: var(--tg-elevated);
+  color: var(--tg-text);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease,
+    filter 0.15s ease;
+  font-family: inherit;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.tg-file-btn:hover {
+  border-color: color-mix(in srgb, var(--tg-accent) 50%, var(--tg-border));
+  background: var(--tg-surface);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tg-accent) 14%, transparent);
+}
+
+.tg-file-btn:focus-within {
+  outline: none;
+  border-color: var(--tg-accent);
+  box-shadow: 0 0 0 3px var(--tg-accent-soft);
+}
+
+.tg-file-btn .tg-file-hidden {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tg-file-btn__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  opacity: 0.92;
+}
+
+.tg-file-btn__icon svg {
+  display: block;
+}
+
+.tg-file-btn--primary {
+  border-color: transparent;
+  background: var(--tg-gradient-primary);
+  color: var(--tg-on-accent);
+}
+
+.tg-file-btn--primary:hover {
+  filter: brightness(1.06);
+  border-color: transparent;
+  box-shadow: 0 4px 22px -8px var(--tg-glow);
+}
+
+.tg-file-btn--primary:focus-within {
+  box-shadow: 0 0 0 3px var(--tg-accent-soft);
+}
+
+.tg-file-btn:has(.tg-file-hidden:disabled),
+.tg-file-btn.tg-file-btn--disabled {
+  opacity: 0.48;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Скролл textarea / прокручиваемых блоков в стиле интерфейса */
+.tg-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--tg-accent) 65%, transparent) var(--tg-elevated);
+}
+
+.tg-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.tg-scroll::-webkit-scrollbar-track {
+  background: var(--tg-elevated);
+  border-radius: 100px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.tg-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--tg-accent-hi) 70%, var(--tg-elevated)),
+    var(--tg-accent-mid)
+  );
+  border-radius: 100px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  min-height: 40px;
+}
+
+.tg-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--tg-accent-hi), var(--tg-accent));
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

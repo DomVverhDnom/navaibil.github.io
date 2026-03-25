@@ -1,0 +1,24 @@
+# Пример unit для systemd (Linux).
+# Скопируйте в /etc/systemd/system/vibetelegram.service, поправьте пути и пользователя:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vibetelegram
+#
+# В .env на сервере: NODE_ENV задаётся здесь; JWT_SECRET, CORS_ORIGINS, TRUST_PROXY=1 и т.д.
+
+[Unit]
+Description=VibeTelegram (Node.js API + SPA)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/vibetelegram
+Environment=NODE_ENV=production
+EnvironmentFile=-/var/www/vibetelegram/.env
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
