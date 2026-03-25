@@ -19,6 +19,13 @@ const text = ref('')
 const sending = ref(false)
 const err = ref('')
 const listEl = ref(null)
+const replyingTo = ref(null)
+
+function snippet(t, max = 72) {
+  const s = String(t || '').replace(/\s+/g, ' ').trim()
+  if (s.length <= max) return s
+  return `${s.slice(0, max - 1)}…`
+}
 
 function scrollCommentsToEnd() {
   nextTick(() => {
@@ -35,6 +42,7 @@ watch(
     loadedOnce.value = false
     text.value = ''
     err.value = ''
+    replyingTo.value = null
   }
 )
 
@@ -57,17 +65,27 @@ function toggle() {
   }
 }
 
+function startReply(c) {
+  replyingTo.value = {
+    id: c.id,
+    authorName: c.authorName,
+    content: c.content,
+  }
+}
+
 async function send() {
   const t = text.value.trim()
   if (!t || sending.value) return
   err.value = ''
   sending.value = true
   try {
+    const body = { content: t }
+    if (replyingTo.value?.id) body.replyToId = replyingTo.value.id
     const res = await api(
       `/api/channels/${encodeURIComponent(props.channelKey)}/posts/${props.postId}/comments`,
       {
-      method: 'POST',
-        body: { content: t },
+        method: 'POST',
+        body,
       }
     )
     const data = await parseJson(res)
@@ -77,6 +95,7 @@ async function send() {
     }
     emit('append', data.comment)
     text.value = ''
+    replyingTo.value = null
   } finally {
     sending.value = false
   }
@@ -110,15 +129,30 @@ function fmtWhen(iso) {
           />
           <div v-else class="pc__ava pc__ava--ph" aria-hidden="true" />
           <div class="pc__item-main">
-          <div class="pc__meta">
-            <span class="pc__author">{{ c.authorName }}</span>
-            <span class="pc__time">{{ fmtWhen(c.createdAt) }}</span>
-          </div>
-          <p class="pc__text">{{ c.content }}</p>
+            <div class="pc__meta">
+              <span class="pc__author">{{ c.authorName }}</span>
+              <span class="pc__time">{{ fmtWhen(c.createdAt) }}</span>
+              <button type="button" class="pc__reply-btn" @click="startReply(c)">Ответить</button>
+            </div>
+            <div v-if="c.replyTo" class="pc__reply-ref">
+              <span class="pc__reply-ref-name">{{ c.replyTo.authorName }}</span>
+              <span class="pc__reply-ref-text">{{ c.replyTo.preview }}</span>
+            </div>
+            <p class="pc__text">{{ c.content }}</p>
           </div>
         </li>
       </ul>
       <p v-else class="pc__empty">Пока нет комментариев.</p>
+
+      <div v-if="replyingTo" class="pc__reply-bar">
+        <div class="pc__reply-bar-text">
+          <span class="pc__reply-bar-label">Ответ для {{ replyingTo.authorName }}</span>
+          <span class="pc__reply-bar-snippet">{{ snippet(replyingTo.content) }}</span>
+        </div>
+        <button type="button" class="pc__reply-bar-cancel" aria-label="Отменить ответ" @click="replyingTo = null">
+          ×
+        </button>
+      </div>
 
       <div class="pc__composer">
         <textarea
@@ -128,6 +162,7 @@ function fmtWhen(iso) {
           maxlength="2000"
           placeholder="Комментарий…"
           @keydown.enter.exact.prevent="send"
+          @keydown.escape.prevent="replyingTo = null"
         />
         <button type="button" class="pc__send" :disabled="sending || !text.trim()" @click="send">Отправить</button>
       </div>
@@ -214,7 +249,8 @@ function fmtWhen(iso) {
 .pc__meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 6px 8px;
   margin-bottom: 4px;
   font-size: 0.75rem;
 }
@@ -226,6 +262,47 @@ function fmtWhen(iso) {
 
 .pc__time {
   color: var(--tg-muted);
+}
+
+.pc__reply-btn {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--tg-radius-sm);
+  background: color-mix(in srgb, var(--tg-gold) 12%, transparent);
+  color: var(--tg-gold);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pc__reply-btn:hover {
+  background: color-mix(in srgb, var(--tg-gold) 22%, transparent);
+}
+
+.pc__reply-ref {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--tg-radius-sm);
+  border-left: 3px solid var(--tg-gold);
+  background: color-mix(in srgb, var(--tg-bg) 70%, var(--tg-surface));
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.pc__reply-ref-name {
+  display: block;
+  font-weight: 600;
+  color: var(--tg-gold);
+  margin-bottom: 2px;
+}
+
+.pc__reply-ref-text {
+  color: var(--tg-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .pc__text {
@@ -240,6 +317,56 @@ function fmtWhen(iso) {
   margin: 0 0 12px;
   font-size: 0.85rem;
   color: var(--tg-muted);
+}
+
+.pc__reply-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid var(--tg-accent-line);
+  background: var(--tg-accent-soft);
+}
+
+.pc__reply-bar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.78rem;
+}
+
+.pc__reply-bar-label {
+  font-weight: 600;
+  color: var(--tg-gold);
+}
+
+.pc__reply-bar-snippet {
+  color: var(--tg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc__reply-bar-cancel {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--tg-radius-sm);
+  background: color-mix(in srgb, var(--tg-border) 40%, transparent);
+  color: var(--tg-text);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pc__reply-bar-cancel:hover {
+  background: color-mix(in srgb, var(--tg-border) 60%, transparent);
 }
 
 .pc__composer {

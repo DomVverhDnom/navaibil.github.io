@@ -157,7 +157,7 @@ onUnmounted(() => disconnectSocket())
         v-for="m in messages"
         :key="m.id"
         class="bubble-wrap"
-        :class="{ 'bubble-wrap--mine': m.mine }"
+        :class="{ 'bubble-wrap--mine': m.fromUserId === user?.id }"
       >
         <div class="bubble">
           <p class="text">{{ m.content }}</p>

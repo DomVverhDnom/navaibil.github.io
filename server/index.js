@@ -543,7 +543,7 @@ function fetchPostRowById(postId) {
 
 function mapCommentRow(row) {
   if (!row) return null
-  return {
+  const out = {
     id: row.id,
     content: row.content,
     createdAt: row.createdAt,
@@ -551,7 +551,29 @@ function mapCommentRow(row) {
     authorId: row.authorId,
     authorAvatar: row.authorAvatar || null,
   }
+  if (row.replyToId && row.replyToCommentId != null) {
+    const text = String(row.replyToContent ?? '')
+    const preview = text.length > 100 ? `${text.slice(0, 99)}…` : text
+    out.replyTo = {
+      id: row.replyToCommentId,
+      authorName: row.replyToAuthorName,
+      preview,
+    }
+  } else {
+    out.replyTo = null
+  }
+  return out
 }
+
+const COMMENT_ROW_SQL = `
+SELECT c.id, c.content, c.created_at AS createdAt, u.display_name AS authorName, u.id AS authorId,
+       u.avatar_path AS authorAvatar,
+       c.reply_to_id AS replyToId,
+       pr.id AS replyToCommentId, pu.display_name AS replyToAuthorName, pr.content AS replyToContent
+FROM post_comments c
+JOIN users u ON u.id = c.user_id
+LEFT JOIN post_comments pr ON pr.id = c.reply_to_id
+LEFT JOIN users pu ON pu.id = pr.user_id`.trim()
 
 const REACTION_KINDS = new Set(['like', 'fire', 'clap', 'heart', '100'])
 
@@ -912,9 +934,10 @@ app.post('/api/dm/with/:otherUserId', requireAuth, requireNotBanned, (req, res) 
     )
     .get(info.lastInsertRowid)
   const msg = mapDirectMessageRow(row, req.userId)
+  const msgForPeer = mapDirectMessageRow(row, otherId)
   const fromPublic = mapUserPublic(promoteAdminFromEnv(fetchAuthUser(req.userId)))
   io.to(`u:${otherId}`).emit('dm:message', {
-    message: msg,
+    message: msgForPeer,
     fromUser: fromPublic
       ? { id: fromPublic.id, displayName: fromPublic.displayName, avatarUrl: fromPublic.avatarUrl }
       : null,
@@ -1679,9 +1702,7 @@ app.get(
     }
     const rows = db
       .prepare(
-        `SELECT c.id, c.content, c.created_at AS createdAt, u.display_name AS authorName, u.id AS authorId,
-                u.avatar_path AS authorAvatar
-         FROM post_comments c JOIN users u ON u.id = c.user_id
+        `${COMMENT_ROW_SQL}
          WHERE c.post_id = ?
          ORDER BY c.created_at ASC, c.id ASC`
       )
@@ -1918,13 +1939,7 @@ app.patch('/api/admin/content/comments/:commentId', requireAuth, requireAdmin, (
     res.status(404).json({ error: 'Комментарий не найден' })
     return
   }
-  const row = db
-    .prepare(
-      `SELECT c.id, c.content, c.created_at AS createdAt, u.display_name AS authorName, u.id AS authorId,
-              u.avatar_path AS authorAvatar
-       FROM post_comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?`
-    )
-    .get(commentId)
+  const row = db.prepare(`${COMMENT_ROW_SQL} WHERE c.id = ?`).get(commentId)
   res.json({ comment: mapCommentRow(row) })
 })
 
@@ -2113,16 +2128,23 @@ app.post(
       res.status(400).json({ error: `Максимум ${MAX_COMMENT_LEN} символов` })
       return
     }
+    let replyToId = null
+    const rawReply = req.body?.replyToId
+    if (rawReply != null && rawReply !== '') {
+      const rid = Number(rawReply)
+      if (Number.isFinite(rid) && rid > 0) {
+        const parent = db
+          .prepare('SELECT id FROM post_comments WHERE id = ? AND post_id = ?')
+          .get(rid, postId)
+        if (parent) replyToId = rid
+      }
+    }
     const info = db
-      .prepare('INSERT INTO post_comments (post_id, user_id, content) VALUES (?, ?, ?)')
-      .run(postId, req.userId, text)
-    const row = db
       .prepare(
-        `SELECT c.id, c.content, c.created_at AS createdAt, u.display_name AS authorName, u.id AS authorId,
-                u.avatar_path AS authorAvatar
-         FROM post_comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?`
+        'INSERT INTO post_comments (post_id, user_id, content, reply_to_id) VALUES (?, ?, ?, ?)'
       )
-      .get(info.lastInsertRowid)
+      .run(postId, req.userId, text, replyToId)
+    const row = db.prepare(`${COMMENT_ROW_SQL} WHERE c.id = ?`).get(info.lastInsertRowid)
     const comment = mapCommentRow(row)
     io.to(`ch:${req.channelId}`).emit('post:comment', {
       channelId: req.channelId,

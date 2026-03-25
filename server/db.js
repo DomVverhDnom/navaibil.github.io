@@ -126,6 +126,15 @@ function ensureChatColumn(colName, alterSql) {
 
 ensureChatColumn('reply_to_id', `ALTER TABLE chat_messages ADD COLUMN reply_to_id INTEGER`)
 
+function ensurePostCommentColumn(colName, alterSql) {
+  const cols = db.prepare(`PRAGMA table_info(post_comments)`).all()
+  if (!cols.some((c) => c.name === colName)) {
+    db.exec(alterSql)
+  }
+}
+
+ensurePostCommentColumn('reply_to_id', `ALTER TABLE post_comments ADD COLUMN reply_to_id INTEGER`)
+
 const postCols2 = db.prepare(`PRAGMA table_info(posts)`).all()
 if (!postCols2.some((c) => c.name === 'channel_id')) {
   db.exec(`ALTER TABLE posts ADD COLUMN channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE`)
