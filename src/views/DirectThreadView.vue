@@ -152,7 +152,7 @@ onUnmounted(() => disconnectSocket())
     <p v-if="err" class="err">{{ err }}</p>
     <p v-if="loading" class="muted">Загрузка…</p>
 
-    <div v-else ref="listEl" class="thread">
+    <div v-else ref="listEl" class="thread tg-scroll">
       <div
         v-for="m in messages"
         :key="m.id"
@@ -183,9 +183,9 @@ onUnmounted(() => disconnectSocket())
 
 <style scoped>
 .page {
-  max-width: 720px;
+  max-width: min(100%, 920px);
   margin: 0 auto;
-  padding: 20px 16px 56px;
+  padding: 20px 20px 56px;
   display: flex;
   flex-direction: column;
   min-height: 60vh;
@@ -232,11 +232,12 @@ onUnmounted(() => disconnectSocket())
 .thread {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 0;
+  padding: 14px 22px 14px 12px;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: min(56vh, 520px);
+  max-height: min(64vh, 680px);
 }
 
 .bubble-wrap {

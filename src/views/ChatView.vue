@@ -24,9 +24,9 @@ const channelKey = computed(() => String(route.params.channelKey || '').trim())
 
 <style scoped>
 .page {
-  max-width: var(--layout-max);
+  max-width: min(100%, 1360px);
   margin: 0 auto;
-  padding: 28px 20px 56px;
+  padding: 28px 24px 56px;
 }
 
 .head {

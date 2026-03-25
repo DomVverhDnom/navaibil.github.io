@@ -198,7 +198,7 @@ onUnmounted(() => disconnect())
       <p class="chat__hint">Сообщения видят участники с доступом к этому каналу.</p>
     </header>
     <p v-if="statusMsg" class="chat__status">{{ statusMsg }}</p>
-    <div ref="listEl" class="chat__list" role="log" aria-live="polite">
+    <div ref="listEl" class="chat__list tg-scroll" role="log" aria-live="polite">
       <div
         v-for="m in messages"
         :key="m.id"
@@ -299,8 +299,8 @@ onUnmounted(() => disconnect())
 .chat {
   display: flex;
   flex-direction: column;
-  min-height: 420px;
-  max-height: min(70vh, 640px);
+  min-height: 500px;
+  max-height: min(78vh, 860px);
   border-radius: var(--tg-radius-lg);
   background: var(--tg-surface);
   border: 1px solid var(--tg-border);
@@ -308,8 +308,8 @@ onUnmounted(() => disconnect())
 }
 
 .chat--page {
-  min-height: min(82vh, 780px);
-  max-height: 82vh;
+  min-height: min(88vh, 920px);
+  max-height: 88vh;
 }
 
 .chat__cover {
@@ -400,7 +400,8 @@ onUnmounted(() => disconnect())
 .chat__list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: 14px 22px 14px 16px;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 12px;
