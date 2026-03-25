@@ -735,9 +735,16 @@ app.post('/api/auth/login', authLimiter, (req, res) => {
     return
   }
   const row = db.prepare('SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE').get(email)
-  if (!row || !row.password_hash) {
+  if (!row) {
+    res.status(401).json({ error: 'Неверный email или пароль' })
+    return
+  }
+  const hasPassword =
+    row.password_hash != null && String(row.password_hash).length > 0
+  if (!hasPassword) {
     res.status(401).json({
-      error: 'Для этого аккаунта задан вход через соцсеть (Google, VK или Яндекс). Пароль не используется.',
+      error:
+        'Для этого аккаунта задан вход через соцсеть (Google, VK или Яндекс). Пароль не используется.',
     })
     return
   }
