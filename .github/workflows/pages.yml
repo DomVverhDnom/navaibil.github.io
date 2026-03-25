@@ -1,5 +1,9 @@
 # Статическая сборка фронта на GitHub Pages (бэкенд Node/SQLite на Pages не работает).
-# Включите: Settings → Pages → Build and deployment → Source: GitHub Actions.
+#
+# Если deploy падает с «Failed to create deployment (404)»:
+# Репозиторий → Settings → Pages → в «Build and deployment» для Source выберите
+# «GitHub Actions», сохраните, затем Actions → повторите неудачный запуск (Re-run).
+# (Сообщение GitHub со ссылкой …/navaibil.github.io/settings/pages часто вводит в заблуждение.)
 name: Deploy GitHub Pages
 
 on:
@@ -43,6 +47,9 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      # Снижает предупреждение о Node 20 в deploy-pages до перехода GitHub на Node 24 по умолчанию
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4.0.5
