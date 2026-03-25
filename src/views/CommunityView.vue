@@ -288,6 +288,18 @@ function reactionCount(post, kind) {
   return typeof n === 'number' && n > 0 ? n : 0
 }
 
+function sameLiveChannelId(a, b) {
+  if (a == null || b == null) return false
+  return Number(a) === Number(b)
+}
+
+function tryJoinCommentChannelRoom() {
+  if (!commentSocket?.connected) return
+  const id = channelId.value
+  if (id == null || id === '') return
+  commentSocket.emit('channel:join', id)
+}
+
 function connectCommentSocket() {
   disconnectCommentSocket()
   if (!token.value || !isSubscribed.value || !channelKey.value) return
@@ -297,22 +309,19 @@ function connectCommentSocket() {
     auth: { token: token.value },
     transports: ['websocket', 'polling'],
   })
-  commentSocket.on('connect', () => {
-    if (channelId.value) {
-      commentSocket.emit('channel:join', channelId.value)
-    }
-  })
+  commentSocket.on('connect', tryJoinCommentChannelRoom)
+  commentSocket.io.on('reconnect', tryJoinCommentChannelRoom)
   commentSocket.on('post:comment', (payload) => {
     const cid = payload?.channelId
     const postId = payload?.postId
     const comment = payload?.comment
-    if (cid == null || cid !== channelId.value || !comment) return
+    if (!sameLiveChannelId(cid, channelId.value) || !comment) return
     pushComment(postId, comment)
   })
   commentSocket.on('post:react', (payload) => {
     const cid = payload?.channelId
     const postId = payload?.postId
-    if (cid == null || cid !== channelId.value || postId == null) return
+    if (!sameLiveChannelId(cid, channelId.value) || postId == null) return
     const p = posts.value.find((x) => x.id === postId)
     if (!p) return
     p.reactionCounts =
@@ -323,14 +332,14 @@ function connectCommentSocket() {
   commentSocket.on('post:remove', (payload) => {
     const cid = payload?.channelId
     const postId = payload?.postId
-    if (cid == null || cid !== channelId.value || postId == null) return
+    if (!sameLiveChannelId(cid, channelId.value) || postId == null) return
     posts.value = posts.value.filter((x) => x.id !== postId)
     delete commentsByPost[postId]
   })
   commentSocket.on('post:pin', (payload) => {
     const cid = payload?.channelId
     const postId = payload?.postId
-    if (cid == null || cid !== channelId.value || postId == null) return
+    if (!sameLiveChannelId(cid, channelId.value) || postId == null) return
     const pin = posts.value.find((x) => x.id === postId)
     if (!pin) return
     pin.pinnedAt = payload.pinnedAt || null
@@ -342,13 +351,18 @@ function connectCommentSocket() {
 function disconnectCommentSocket() {
   if (commentSocket) {
     commentSocket.removeAllListeners()
+    commentSocket.io.off('reconnect', tryJoinCommentChannelRoom)
     commentSocket.disconnect()
     commentSocket = null
   }
 }
 
+watch(channelId, () => {
+  tryJoinCommentChannelRoom()
+})
+
 watch(
-  [channelKey, isSubscribed],
+  [channelKey, isSubscribed, token],
   async () => {
     Object.keys(commentsByPost).forEach((k) => delete commentsByPost[k])
     posts.value = []
