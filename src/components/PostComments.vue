@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed } from 'vue'
 import { api, parseJson } from '../lib/api'
 import { mediaUrl } from '../lib/mediaUrl'
 import { useAuth } from '../composables/useAuth'
@@ -8,9 +8,15 @@ const props = defineProps({
   channelKey: { type: String, required: true },
   postId: { type: Number, required: true },
   comments: { type: Array, default: () => [] },
+  /** Число из ленты (GET /posts), пока комментарии не подгружали в память */
+  feedCommentCount: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['fetch', 'append'])
+
+const commentLabelCount = computed(() =>
+  Math.max(props.comments.length, Number(props.feedCommentCount) || 0)
+)
 
 const { user } = useAuth()
 const open = ref(false)
@@ -113,7 +119,7 @@ function fmtWhen(iso) {
 <template>
   <div class="pc">
     <button type="button" class="pc__toggle" @click="toggle">
-      {{ open ? 'Скрыть комментарии' : `Комментарии (${comments.length})` }}
+      {{ open ? 'Скрыть комментарии' : `Комментарии (${commentLabelCount})` }}
     </button>
 
     <div v-if="open" class="pc__body">

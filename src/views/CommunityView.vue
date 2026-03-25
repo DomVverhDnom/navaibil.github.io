@@ -54,6 +54,8 @@ function pushComment(postId, comment) {
   if (!commentsByPost[postId]) commentsByPost[postId] = []
   if (commentsByPost[postId].some((c) => c.id === comment.id)) return
   commentsByPost[postId].push(comment)
+  const post = posts.value.find((x) => x.id === postId)
+  if (post) post.commentCount = (Number(post.commentCount) || 0) + 1
 }
 
 function onPhotoChange(e) {
@@ -254,7 +256,12 @@ async function fetchComments(postId) {
   if (!k) return
   const res = await api(`/api/channels/${encodeURIComponent(k)}/posts/${postId}/comments`)
   const data = await parseJson(res)
-  if (res.ok) commentsByPost[postId] = data.comments || []
+  if (res.ok) {
+    const list = data.comments || []
+    commentsByPost[postId] = list
+    const post = posts.value.find((x) => x.id === postId)
+    if (post) post.commentCount = list.length
+  }
 }
 
 function onCommentAppend(postId, comment) {
@@ -530,6 +537,7 @@ onUnmounted(() => {
             :channel-key="channelKey"
             :post-id="p.id"
             :comments="commentsByPost[p.id] || []"
+            :feed-comment-count="p.commentCount ?? 0"
             @fetch="fetchComments(p.id)"
             @append="onCommentAppend(p.id, $event)"
           />

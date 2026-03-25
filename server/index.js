@@ -475,6 +475,8 @@ function requireStaff(req, res, next) {
 
 function mapPostRow(row) {
   if (!row) return null
+  const cc = row.commentCount
+  const commentCount = typeof cc === 'number' && Number.isFinite(cc) ? cc : Number(cc) || 0
   return {
     id: row.id,
     content: row.content,
@@ -484,6 +486,7 @@ function mapPostRow(row) {
     authorId: row.authorId,
     authorAvatar: row.authorAvatar || null,
     imagePath: row.imagePath || null,
+    commentCount,
   }
 }
 
@@ -531,14 +534,13 @@ function deletePostAndAssets(postId) {
   return true
 }
 
+const SQL_POST_SELECT_CORE = `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
+              u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar,
+              (SELECT COUNT(*) FROM post_comments pc WHERE pc.post_id = p.id) AS commentCount
+       FROM posts p JOIN users u ON u.id = p.user_id`
+
 function fetchPostRowById(postId) {
-  return db
-    .prepare(
-      `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
-              u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar
-       FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
-    )
-    .get(postId)
+  return db.prepare(`${SQL_POST_SELECT_CORE} WHERE p.id = ?`).get(postId)
 }
 
 function mapCommentRow(row) {
@@ -1510,9 +1512,7 @@ app.get(
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
     const rows = db
       .prepare(
-        `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
-                u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar
-         FROM posts p JOIN users u ON u.id = p.user_id
+        `${SQL_POST_SELECT_CORE}
          WHERE p.channel_id = ?
          ORDER BY (CASE WHEN p.pinned_at IS NOT NULL THEN 0 ELSE 1 END),
                   p.pinned_at DESC,
@@ -1558,13 +1558,7 @@ app.post(
       return postId
     })
     const postId = insertPostWithImages(req.userId, content, req.channelId, files)
-    const row = db
-      .prepare(
-        `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
-                u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar
-         FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
-      )
-      .get(postId)
+    const row = fetchPostRowById(postId)
     const [enriched] = enrichPostsWithImages([mapPostRow(row)])
     const post = { ...enriched, reactionCounts: {}, myReaction: null }
     res.status(201).json({ post, channelId: req.channelId })
@@ -1598,13 +1592,7 @@ app.patch(
     } else {
       db.prepare(`UPDATE posts SET pinned_at = NULL WHERE id = ? AND channel_id = ?`).run(postId, req.channelId)
     }
-    const fresh = db
-      .prepare(
-        `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
-                u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar
-         FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
-      )
-      .get(postId)
+    const fresh = fetchPostRowById(postId)
     const [enriched] = enrichPostsWithImages([mapPostRow(fresh)])
     const withReactions = attachPostReactions(req.userId, [enriched])[0]
     io.to(`ch:${req.channelId}`).emit('post:pin', {
