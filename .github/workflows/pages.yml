@@ -38,6 +38,19 @@ jobs:
           # Опционально: URL вашего API (секрет в Settings → Secrets), иначе запросы идут на origin Pages
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
         run: npm run build
+      - name: Проверка: в dist должен быть production-бандл, не /src/main.js
+        run: |
+          set -e
+          if grep -qE '"/src/|/src/main\.js' dist/index.html; then
+            echo 'Ошибка: dist/index.html похож на dev-шаблон (есть /src/).'
+            cat dist/index.html
+            exit 1
+          fi
+          if ! grep -qE 'assets/[^"]+\.js' dist/index.html; then
+            echo 'Ошибка: в dist/index.html нет ссылки на assets/*.js'
+            cat dist/index.html
+            exit 1
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
