@@ -4,6 +4,7 @@
 # (у вас: DomVverhDnom.github.io). В Custom domain нельзя вписывать *.github.io — только свой домен или пусто.
 #
 # Если deploy падает с «Failed to create deployment (404)»: Settings → Pages → Source: GitHub Actions → Re-run workflow.
+# Белый экран при живом index.html: чаще всего Source = «Deploy from branch» — отдаётся корень репо с /src/main.js, нужен только GitHub Actions + артефакт dist.
 name: Deploy GitHub Pages
 
 on:
