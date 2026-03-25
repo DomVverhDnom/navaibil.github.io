@@ -2231,12 +2231,13 @@ if (serveSpa) {
       },
     })
   )
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io') || req.path.startsWith('/uploads')) {
+  // Express 5 / path-to-regexp: маршрут '*' недопустим — SPA через middleware после static
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
       next()
       return
     }
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
+    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io') || req.path.startsWith('/uploads')) {
       next()
       return
     }

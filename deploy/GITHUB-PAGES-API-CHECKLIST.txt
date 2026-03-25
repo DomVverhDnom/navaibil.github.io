@@ -1,0 +1,36 @@
+Связка: фронт на GitHub Pages + API на VPS (Timeweb)
+
+Что сделать вручную (робот из репозитория это не сделает):
+
+1) DNS у регистратора
+   - Запись A: api.ваш-домен.ru → IP VPS (например 147.45.97.72)
+   - Подождите распространения DNS (иногда до часа)
+
+2) На сервере: Node слушает только localhost, наружу — nginx
+   - В .env приложения: HOST=127.0.0.1 PORT=3000 TRUST_PROXY=1
+   - pm2 restart vibetelegram
+
+3) Nginx + сертификат (автоматизация)
+   Из корня клона репозитория на VPS:
+     export API_DOMAIN=api.ваш-домен.ru
+     export CERTBOT_EMAIL=ваш@email.ru
+     export PAGES_ORIGIN=https://domvverhdnom.github.io
+     export APP_PUBLIC_URL=https://domvverhdnom.github.io/navaibil.github.io
+     sudo -E bash deploy/setup-api-https-and-pages.sh
+   В панели Timeweb откройте входящие TCP 80 и 443.
+
+4) GitHub (репозиторий с Pages)
+   Settings → Secrets and variables → Actions:
+     VITE_API_URL = https://api.ваш-домен.ru   (без слэша в конце, тот же хост что в шаге 3)
+   Actions → Deploy GitHub Pages → Run workflow
+
+5) OAuth (если включите)
+   В консолях провайдеров redirect URI:
+     https://api.ваш-домен.ru/api/auth/oauth/google/callback
+     (и аналогично vk, yandex)
+
+6) Проверка
+   Браузер: сайт на Pages → вход / запросы в Network идут на https://api.ваш-домен.ru
+   Консоль без ошибок CORS.
+
+Подробнее про nginx вручную: deploy/nginx-api-https.conf.example
