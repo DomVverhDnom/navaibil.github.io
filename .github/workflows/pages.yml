@@ -38,7 +38,7 @@ jobs:
           # Опционально: URL вашего API (секрет в Settings → Secrets), иначе запросы идут на origin Pages
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
         run: npm run build
-      - name: Проверка: в dist должен быть production-бандл, не /src/main.js
+      - name: "Проверка dist — production-бандл, не /src/main.js"
         run: |
           set -e
           if grep -qE '"/src/|/src/main\.js' dist/index.html; then
