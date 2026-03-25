@@ -1,9 +1,9 @@
 # Статическая сборка фронта на GitHub Pages (бэкенд Node/SQLite на Pages не работает).
 #
-# Если deploy падает с «Failed to create deployment (404)»:
-# Репозиторий → Settings → Pages → в «Build and deployment» для Source выберите
-# «GitHub Actions», сохраните, затем Actions → повторите неудачный запуск (Re-run).
-# (Сообщение GitHub со ссылкой …/navaibil.github.io/settings/pages часто вводит в заблуждение.)
+# Сайт в корне https://<user>.github.io/ — репозиторий должен называться <user>.github.io
+# (у вас: DomVverhDnom.github.io). В Custom domain нельзя вписывать *.github.io — только свой домен или пусто.
+#
+# Если deploy падает с «Failed to create deployment (404)»: Settings → Pages → Source: GitHub Actions → Re-run workflow.
 name: Deploy GitHub Pages
 
 on:
@@ -32,9 +32,9 @@ jobs:
       - run: npm ci
       - name: Build
         env:
-          # Путь к сайту: https://<user>.github.io/<имя-репозитория>/
-          VITE_GH_PAGES_BASE: /${{ github.event.repository.name }}/
-          # Опционально: URL вашего API (секрет в Settings → Secrets), иначе запросы идут на github.io
+          # User/org site: репо <owner>.github.io → base /. Иначе project site → /<repo>/
+          VITE_GH_PAGES_BASE: ${{ github.event.repository.name == format('{0}.github.io', github.repository_owner) && '/' || format('/{0}/', github.event.repository.name) }}
+          # Опционально: URL вашего API (секрет в Settings → Secrets), иначе запросы идут на origin Pages
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
         run: npm run build
       - uses: actions/upload-pages-artifact@v3
