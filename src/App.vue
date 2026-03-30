@@ -6,10 +6,17 @@ import AppNav from './components/AppNav.vue'
 <template>
   <AppNav />
   <main class="main">
-    <RouterView />
+    <RouterView v-slot="{ Component }">
+      <Transition name="fade-page" mode="out-in">
+        <component :is="Component" />
+      </Transition>
+    </RouterView>
   </main>
   <footer class="footer">
-    <p>Роли: пользователь / модератор / админ. Посты — только модераторы и админы. ADMIN_EMAILS в .env для назначения админов.</p>
+    <p>
+      PrivateCommunity — закрытые каналы с лентой и чатом. Администраторы каналов управляют участниками и модерируют обсуждения;
+      техническая админка сайта доступна только роли «админ».
+    </p>
   </footer>
 </template>
 

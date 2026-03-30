@@ -5,7 +5,7 @@ import { useAuth } from '../composables/useAuth'
 import { api, parseJson } from '../lib/api'
 
 const router = useRouter()
-const { isStaff, isAdmin, refreshMe } = useAuth()
+const { isAdmin, refreshMe } = useAuth()
 
 const users = ref([])
 const loading = ref(true)
@@ -33,9 +33,10 @@ const chatIdEdit = ref('')
 const chatBody = ref('')
 const chatIdDel = ref('')
 const contentOk = ref('')
+const tab = ref('users')
 
 async function load() {
-  if (!isStaff.value) return
+  if (!isAdmin.value) return
   loading.value = true
   err.value = ''
   try {
@@ -269,103 +270,133 @@ function fmt(iso) {
 watch(search, () => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
-    if (isStaff.value) load()
+    if (isAdmin.value) load()
   }, 320)
 })
 
 onMounted(() => {
-  if (!isStaff.value) {
+  if (!isAdmin.value) {
     router.replace('/')
     return
   }
   load()
-  if (isAdmin.value) loadChannels()
+  loadChannels()
 })
+
+function setAdminTab(id) {
+  tab.value = id
+  contentOk.value = ''
+  actionErr.value = ''
+  if (id === 'channels') loadChannels()
+  if (id === 'users') load()
+}
 </script>
 
 <template>
   <div class="page">
-    <h1 class="title">Админка</h1>
-    <p class="lead">
-      Модератор видит пользователей и поиск. Администратор сайта: роли, бан пользователей, блокировка каналов, правка и
-      удаление постов, комментариев и сообщений чата.
-    </p>
+    <header class="admin-head">
+      <h1 class="title">Администрирование</h1>
+      <p class="lead">
+        Управление пользователями и каналами платформы, экстренная правка контента по числовому ID. Модерация постов и чатов
+        внутри канала выполняется командой канала в интерфейсе ленты.
+      </p>
+    </header>
 
-    <div class="toolbar">
-      <input
-        v-model="search"
-        type="search"
-        class="search-inp"
-        placeholder="Поиск: email, имя или ID…"
-        autocomplete="off"
-      />
-    </div>
+    <nav class="tabs" aria-label="Разделы">
+      <button type="button" class="tab" :class="{ 'tab--on': tab === 'users' }" @click="setAdminTab('users')">
+        Пользователи
+      </button>
+      <button type="button" class="tab" :class="{ 'tab--on': tab === 'channels' }" @click="setAdminTab('channels')">
+        Каналы
+      </button>
+      <button type="button" class="tab" :class="{ 'tab--on': tab === 'content' }" @click="setAdminTab('content')">
+        Контент по ID
+      </button>
+    </nav>
 
-    <p v-if="actionErr" class="err">{{ actionErr }}</p>
-    <p v-if="contentOk" class="ok-msg">{{ contentOk }}</p>
-    <p v-if="err" class="err">{{ err }}</p>
-    <p v-if="loading" class="muted">Загрузка…</p>
+    <p v-if="actionErr" class="err banner">{{ actionErr }}</p>
+    <p v-if="contentOk" class="ok-msg banner">{{ contentOk }}</p>
 
-    <div v-else class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Имя / email</th>
-            <th>Роль</th>
-            <th>Подписка до</th>
-            <th>Бан</th>
-            <th>Сообщения</th>
-            <th>Действия</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="u in users" :key="u.id">
-            <td>{{ u.id }}</td>
-            <td>
-              <div class="name">{{ u.displayName }}</div>
-              <div class="email">{{ u.email }}</div>
-            </td>
-            <td>
-              <template v-if="isAdmin">
-                <select v-model="rolePick[u.id]" class="select">
-                  <option value="user">Пользователь</option>
-                  <option value="moderator">Модератор</option>
-                  <option value="admin">Админ</option>
-                </select>
-                <button type="button" class="btn btn--sm" @click="setRole(u.id)">OK</button>
-              </template>
-              <span v-else class="role-pill">{{ u.role }}</span>
-            </td>
-            <td class="muted">{{ fmt(u.subscriptionEnds) }}</td>
-            <td>
-              <span v-if="u.banned" class="bad">да</span>
-              <span v-else class="ok">нет</span>
-            </td>
-            <td>
-              <RouterLink :to="`/messages/${u.id}`" class="dm">Написать</RouterLink>
-            </td>
-            <td class="actions">
-              <template v-if="isAdmin">
+    <section v-show="tab === 'users'" class="panel">
+      <div class="toolbar">
+        <input
+          v-model="search"
+          type="search"
+          class="search-inp"
+          placeholder="Поиск по email, имени или ID…"
+          autocomplete="off"
+        />
+        <button type="button" class="btn btn--ghost btn--sm" :disabled="loading" @click="load">Обновить список</button>
+      </div>
+      <p v-if="err" class="err">{{ err }}</p>
+      <p v-if="loading" class="muted">Загрузка…</p>
+      <div v-else class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Пользователь</th>
+              <th>Роль</th>
+              <th>Подписка</th>
+              <th>Бан</th>
+              <th>Связь</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="u in users" :key="u.id" class="t-row">
+              <td class="cell-user">
+                <span class="uid">#{{ u.id }}</span>
+                <div class="name">{{ u.displayName }}</div>
+                <div class="email">{{ u.email }}</div>
+              </td>
+              <td>
+                <div class="role-row">
+                  <select v-model="rolePick[u.id]" class="select">
+                    <option value="user">Пользователь</option>
+                    <option value="moderator">Модератор</option>
+                    <option value="admin">Админ</option>
+                  </select>
+                  <button type="button" class="btn btn--sm" @click="setRole(u.id)">Применить</button>
+                </div>
+              </td>
+              <td class="muted nowrap">{{ fmt(u.subscriptionEnds) }}</td>
+              <td>
+                <span v-if="u.banned" class="bad">да</span>
+                <span v-else class="ok">нет</span>
+              </td>
+              <td>
+                <RouterLink :to="`/users/${u.id}`" class="dm">Профиль</RouterLink>
+              </td>
+              <td class="actions">
                 <template v-if="!u.banned">
-                  <input v-model="banReason[u.id]" type="text" class="inp" placeholder="Причина" />
-                  <input v-model="banDays[u.id]" type="number" min="0" class="inp inp--n" placeholder="дней (0=навсегда)" />
+                  <input v-model="banReason[u.id]" type="text" class="inp inp--ban" placeholder="Причина бана" />
+                  <input
+                    v-model="banDays[u.id]"
+                    type="number"
+                    min="0"
+                    class="inp inp--days"
+                    placeholder="Дней (пусто — навсегда)"
+                  />
                   <button type="button" class="btn btn--warn btn--sm" @click="banUser(u.id)">Забанить</button>
                 </template>
-                <button v-else type="button" class="btn btn--sm" @click="unbanUser(u.id)">Разбан</button>
-              </template>
-              <span v-else class="muted small">Только админ сайта</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+                <button v-else type="button" class="btn btn--sm" @click="unbanUser(u.id)">Снять бан</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
-    <template v-if="isAdmin">
-      <h2 class="h2">Каналы (блокировка)</h2>
+    <section v-show="tab === 'channels'" class="panel">
+      <div class="panel__head">
+        <p class="panel__hint">Блокировка канала закрывает доступ для всех, кроме администраторов сайта.</p>
+        <button type="button" class="btn btn--ghost btn--sm" :disabled="loadingCh" @click="loadChannels">
+          Обновить
+        </button>
+      </div>
       <p v-if="chErr" class="err">{{ chErr }}</p>
-      <p v-if="loadingCh" class="muted">Загрузка каналов…</p>
-      <div v-else class="table-wrap ch-table">
+      <p v-if="loadingCh" class="muted">Загрузка…</p>
+      <div v-else class="table-wrap">
         <table class="table">
           <thead>
             <tr>
@@ -373,12 +404,12 @@ onMounted(() => {
               <th>Канал</th>
               <th>Владелец</th>
               <th>Статус</th>
-              <th>Действие</th>
+              <th>Действия</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="ch in adminChannels" :key="ch.id">
-              <td>{{ ch.id }}</td>
+              <td class="muted">{{ ch.id }}</td>
               <td>
                 <div class="name">{{ ch.name }}</div>
                 <div class="email">@{{ ch.slug }}</div>
@@ -396,59 +427,67 @@ onMounted(() => {
                   <button type="button" class="btn btn--sm" @click="setChannelBlocked(ch, false)">Разблокировать</button>
                 </template>
                 <template v-else>
-                  <input
-                    v-model="blockReasonDraft[ch.id]"
-                    type="text"
-                    class="inp inp--wide"
-                    placeholder="Причина (необязательно)"
-                  />
-                  <button type="button" class="btn btn--warn btn--sm" @click="setChannelBlocked(ch, true)">
-                    Заблокировать
-                  </button>
+                  <div class="ch-actions">
+                    <input
+                      v-model="blockReasonDraft[ch.id]"
+                      type="text"
+                      class="inp inp--wide"
+                      placeholder="Причина блокировки (по желанию)"
+                    />
+                    <button type="button" class="btn btn--warn btn--sm" @click="setChannelBlocked(ch, true)">
+                      Заблокировать
+                    </button>
+                  </div>
                 </template>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+    </section>
 
-      <h2 class="h2">Контент по ID</h2>
-      <p class="hint">ID берите из БД или из ответов API. Удаление поста удаляет комментарии и реакции.</p>
+    <section v-show="tab === 'content'" class="panel">
+      <p class="hint">
+        Укажите числовой идентификатор из базы или из ответа API. Удаление поста удаляет связанные комментарии и реакции.
+      </p>
 
       <div class="mod-grid">
         <div class="mod-card">
           <h3 class="h3">Пост</h3>
           <label class="lbl">ID поста <input v-model="postIdEdit" type="number" class="inp inp--wide" /></label>
-          <label class="lbl">Новый текст <textarea v-model="postBody" class="ta" rows="3" placeholder="Оставьте пустым, если только фото…" /></label>
-          <label class="chk"><input v-model="postClearImg" type="checkbox" /> Удалить все изображения поста</label>
+          <label class="lbl"
+            >Новый текст
+            <textarea v-model="postBody" class="ta" rows="3" placeholder="Пусто — без смены текста…"></textarea>
+          </label>
+          <label class="chk"><input v-model="postClearImg" type="checkbox" /> Сбросить все изображения поста</label>
           <button type="button" class="btn btn--sm" @click="patchPost">Сохранить пост</button>
           <hr class="hr" />
-          <label class="lbl">Удалить пост ID <input v-model="postIdDel" type="number" class="inp inp--wide" /></label>
-          <button type="button" class="btn btn--warn btn--sm" @click="deletePost">Удалить пост</button>
+          <label class="lbl">Удалить пост, ID <input v-model="postIdDel" type="number" class="inp inp--wide" /></label>
+          <button type="button" class="btn btn--warn btn--sm" @click="deletePost">Удалить навсегда</button>
         </div>
         <div class="mod-card">
-          <h3 class="h3">Комментарий к посту</h3>
+          <h3 class="h3">Комментарий</h3>
           <label class="lbl">ID <input v-model="commentIdEdit" type="number" class="inp inp--wide" /></label>
-          <label class="lbl">Текст <textarea v-model="commentBody" class="ta" rows="3" /></label>
+          <label class="lbl">Новый текст <textarea v-model="commentBody" class="ta" rows="3" /></label>
           <button type="button" class="btn btn--sm" @click="patchComment">Сохранить</button>
           <hr class="hr" />
-          <label class="lbl">Удалить ID <input v-model="commentIdDel" type="number" class="inp inp--wide" /></label>
+          <label class="lbl">Удалить, ID <input v-model="commentIdDel" type="number" class="inp inp--wide" /></label>
           <button type="button" class="btn btn--warn btn--sm" @click="deleteComment">Удалить</button>
         </div>
         <div class="mod-card">
-          <h3 class="h3">Сообщение в чате канала</h3>
+          <h3 class="h3">Сообщение в чате</h3>
           <label class="lbl">ID <input v-model="chatIdEdit" type="number" class="inp inp--wide" /></label>
-          <label class="lbl">Текст <textarea v-model="chatBody" class="ta" rows="3" /></label>
+          <label class="lbl">Новый текст <textarea v-model="chatBody" class="ta" rows="3" /></label>
           <button type="button" class="btn btn--sm" @click="patchChat">Сохранить</button>
           <hr class="hr" />
-          <label class="lbl">Удалить ID <input v-model="chatIdDel" type="number" class="inp inp--wide" /></label>
+          <label class="lbl">Удалить, ID <input v-model="chatIdDel" type="number" class="inp inp--wide" /></label>
           <button type="button" class="btn btn--warn btn--sm" @click="deleteChat">Удалить</button>
         </div>
       </div>
-    </template>
+    </section>
 
     <p class="fine">
-      Назначьте первого админа через переменную <code>ADMIN_EMAILS</code> в <code>.env</code> (email через запятую) и перезапустите API.
+      Первый администратор задаётся в <code>ADMIN_EMAILS</code> в <code>.env</code> (email через запятую), затем перезапуск API.
     </p>
   </div>
 </template>
@@ -458,6 +497,10 @@ onMounted(() => {
   max-width: var(--layout-max);
   margin: 0 auto;
   padding: 28px 16px 56px;
+}
+
+.admin-head {
+  margin-bottom: 8px;
 }
 
 .title {
@@ -471,21 +514,111 @@ onMounted(() => {
   color: var(--tg-muted);
   font-size: 0.92rem;
   line-height: 1.5;
+  max-width: 52rem;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.tab {
+  padding: 10px 18px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-surface);
+  color: var(--tg-muted);
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s;
+}
+
+.tab:hover {
+  color: var(--tg-text);
+  border-color: color-mix(in srgb, var(--tg-accent) 28%, var(--tg-border));
+}
+
+.tab--on {
+  color: var(--tg-text);
+  background: var(--tg-accent-soft);
+  border-color: color-mix(in srgb, var(--tg-accent) 45%, var(--tg-border));
+}
+
+.panel {
+  margin-bottom: 8px;
+}
+
+.panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel__hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--tg-muted);
+  max-width: 42rem;
+  line-height: 1.45;
 }
 
 .toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
   margin-bottom: 16px;
 }
 
 .search-inp {
-  width: 100%;
-  max-width: 420px;
+  flex: 1;
+  min-width: 220px;
+  max-width: 480px;
   padding: 10px 14px;
   border-radius: var(--tg-radius-sm);
   border: 1px solid var(--tg-border);
   background: var(--tg-elevated);
   color: var(--tg-text);
   font-size: 0.92rem;
+}
+
+.banner {
+  padding: 10px 14px;
+  border-radius: var(--tg-radius-sm);
+}
+
+.role-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.cell-user .uid {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--tg-muted);
+  letter-spacing: 0.04em;
+}
+
+.ch-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 200px;
+}
+
+.nowrap {
+  white-space: nowrap;
 }
 
 .dm {
@@ -650,12 +783,17 @@ th {
   font-size: 0.8rem;
 }
 
-.inp--n {
-  max-width: 100px;
+.inp--ban {
+  max-width: 100%;
+  min-width: 140px;
+}
+
+.inp--days {
+  max-width: 140px;
 }
 
 .actions {
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .btn {
@@ -672,6 +810,13 @@ th {
 .btn--sm {
   padding: 6px 10px;
   font-size: 0.78rem;
+}
+
+.btn--ghost {
+  background: var(--tg-elevated);
+  color: var(--tg-text);
+  border: 1px solid var(--tg-border);
+  box-shadow: none;
 }
 
 .btn--warn {

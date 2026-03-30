@@ -150,8 +150,12 @@ watch(
 }
 
 .blocked-ch__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 12px;
   font-size: 2.25rem;
-  margin-bottom: 12px;
+  line-height: 0;
 }
 
 .blocked-ch__title {
@@ -272,8 +276,12 @@ watch(
 }
 
 .banned__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 12px;
   font-size: 2.25rem;
-  margin-bottom: 12px;
+  line-height: 0;
 }
 
 .banned__title {

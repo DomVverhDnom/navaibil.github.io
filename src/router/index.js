@@ -14,14 +14,27 @@ import ChannelsView from '../views/ChannelsView.vue'
 import ChannelManageView from '../views/ChannelManageView.vue'
 import MessagesView from '../views/MessagesView.vue'
 import DirectThreadView from '../views/DirectThreadView.vue'
+import UserProfileView from '../views/UserProfileView.vue'
 
 const routes = [
-  { path: '/', name: 'home', component: HomeView, meta: { title: 'Vibe Club' } },
+  { path: '/', name: 'home', component: HomeView, meta: { title: 'PrivateCommunity' } },
   {
     path: '/channels',
     name: 'channels',
     component: ChannelsView,
     meta: { title: 'Каналы', requiresAuth: true },
+  },
+  {
+    path: '/channels/create',
+    name: 'channel-create',
+    component: () => import('../views/ChannelCreateView.vue'),
+    meta: { title: 'Новый канал', requiresAuth: true },
+  },
+  {
+    path: '/channels/join',
+    name: 'channel-join',
+    component: () => import('../views/ChannelJoinView.vue'),
+    meta: { title: 'Вступить в канал', requiresAuth: true },
   },
   {
     path: '/channels/:channelKey/feed',
@@ -95,10 +108,16 @@ const routes = [
     meta: { title: 'Диалог', requiresAuth: true },
   },
   {
+    path: '/users/:userId',
+    name: 'user-profile',
+    component: UserProfileView,
+    meta: { title: 'Профиль', requiresAuth: true },
+  },
+  {
     path: '/admin',
     name: 'admin',
     component: AdminView,
-    meta: { title: 'Админка', requiresAuth: true, requiresStaff: true },
+    meta: { title: 'Админка', requiresAuth: true, requiresAdmin: true },
   },
 ]
 
@@ -111,15 +130,15 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  if (to.meta.requiresAuth || to.meta.requiresStaff) {
+  if (to.meta.requiresAuth || to.meta.requiresAdmin) {
     invalidateAuthPrepare()
   }
-  const { prepareAuth, isAuthenticated, isStaff } = useAuth()
+  const { prepareAuth, isAuthenticated, isAdmin } = useAuth()
   await prepareAuth()
   if (to.meta.requiresAuth && !isAuthenticated.value) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
-  if (to.meta.requiresStaff && !isStaff.value) {
+  if (to.meta.requiresAdmin && !isAdmin.value) {
     return { name: 'home' }
   }
   if (
@@ -134,9 +153,11 @@ router.beforeEach(async (to) => {
   return true
 })
 
+const APP_TITLE = 'PrivateCommunity'
+
 router.afterEach((to) => {
-  const base = to.meta.title || 'Vibe Club'
-  document.title = base === 'Vibe Club' ? base : `${base} · Vibe Club`
+  const base = to.meta.title || APP_TITLE
+  document.title = base === APP_TITLE ? base : `${base} · ${APP_TITLE}`
 })
 
 export default router

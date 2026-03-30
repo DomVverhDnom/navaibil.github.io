@@ -213,6 +213,7 @@ watch([channelKey, canView], load, { immediate: true })
             <thead>
               <tr>
                 <th>Пользователь</th>
+                <th>Уровень</th>
                 <th>План</th>
                 <th>Статус</th>
                 <th>До</th>
@@ -225,6 +226,7 @@ watch([channelKey, canView], load, { immediate: true })
                   <div class="name">{{ r.displayName }}</div>
                   <div class="email">{{ r.email }}</div>
                 </td>
+                <td>{{ r.tierName || '—' }}</td>
                 <td>{{ planRu(r.plan) }}</td>
                 <td>{{ subStatusRu(r) }}</td>
                 <td>{{ fmtShortDate(r.currentPeriodEnd) }}</td>

@@ -247,7 +247,6 @@ onUnmounted(() => {
   height: 22px;
   margin-top: 0;
   z-index: 4;
-  /* центр по области слайдов: пагинация не в потоке */
   top: 50%;
   transform: translateY(-50%);
 }

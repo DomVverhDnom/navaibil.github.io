@@ -2,7 +2,7 @@
 import { ref, watch, onUnmounted, computed, nextTick } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { io } from 'socket.io-client'
-import { api, apiBase, parseJson } from '../lib/api'
+import { api, apiBase, apiForm, parseJson } from '../lib/api'
 import { mediaUrl } from '../lib/mediaUrl'
 import { useAuth } from '../composables/useAuth'
 
@@ -15,7 +15,11 @@ const messages = ref([])
 const draft = ref('')
 const err = ref('')
 const loading = ref(true)
+const sending = ref(false)
 const listEl = ref(null)
+const fileInput = ref(null)
+const pendingFile = ref(null)
+const pendingPreview = ref(null)
 
 const origin = apiBase() || undefined
 let socket = null
@@ -89,26 +93,74 @@ async function loadThread() {
   }
 }
 
+function pickPhoto() {
+  fileInput.value?.click()
+}
+
+function onFileSelected(ev) {
+  const input = ev.target
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f || !/^image\//.test(f.type)) return
+  if (pendingPreview.value) URL.revokeObjectURL(pendingPreview.value)
+  pendingFile.value = f
+  pendingPreview.value = URL.createObjectURL(f)
+}
+
+function clearPendingPhoto() {
+  if (pendingPreview.value) URL.revokeObjectURL(pendingPreview.value)
+  pendingPreview.value = null
+  pendingFile.value = null
+}
+
 async function send() {
   const t = draft.value.trim()
   const oid = peerId.value
-  const me = user.value?.id
-  if (!t || !oid) return
+  const file = pendingFile.value
+  if ((!t && !file) || !oid) return
+
+  const prevDraft = draft.value
+  const prevFile = file
   draft.value = ''
-  const res = await api(`/api/dm/with/${oid}`, { method: 'POST', body: { content: t } })
-  const data = await parseJson(res)
-  if (!res.ok) {
-    err.value = data?.error || 'Не отправлено'
-    draft.value = t
-    return
-  }
+  clearPendingPhoto()
+  sending.value = true
   err.value = ''
-  if (data.message && !messages.value.some((m) => m.id === data.message.id)) {
-    messages.value.push(data.message)
-    await nextTick()
-    scrollBottom()
+
+  try {
+    let res
+    if (prevFile) {
+      const fd = new FormData()
+      fd.append('photo', prevFile)
+      fd.append('content', t)
+      res = await apiForm(`/api/dm/with/${oid}`, fd)
+    } else {
+      res = await api(`/api/dm/with/${oid}`, { method: 'POST', body: { content: t } })
+    }
+    const data = await parseJson(res)
+    if (!res.ok) {
+      err.value = data?.error || 'Не отправлено'
+      draft.value = prevDraft
+      if (prevFile) {
+        pendingFile.value = prevFile
+        pendingPreview.value = URL.createObjectURL(prevFile)
+      }
+      return
+    }
+    if (data.message && !messages.value.some((m) => m.id === data.message.id)) {
+      messages.value.push(data.message)
+      await nextTick()
+      scrollBottom()
+    }
+  } finally {
+    sending.value = false
   }
 }
+
+const canSend = computed(() => {
+  const oid = peerId.value
+  if (!Number.isFinite(oid) || oid <= 0) return false
+  return !!(draft.value.trim() || pendingFile.value)
+})
 
 function fmtWhen(iso) {
   try {
@@ -126,7 +178,10 @@ watch(
   { immediate: true }
 )
 
-onUnmounted(() => disconnectSocket())
+onUnmounted(() => {
+  clearPendingPhoto()
+  disconnectSocket()
+})
 </script>
 
 <template>
@@ -134,19 +189,21 @@ onUnmounted(() => disconnectSocket())
     <RouterLink to="/messages" class="back">← Все диалоги</RouterLink>
 
     <header v-if="peer" class="head">
-      <img
-        v-if="peer.avatarUrl"
-        class="av"
-        :src="mediaUrl(peer.avatarUrl)"
-        alt=""
-        width="40"
-        height="40"
-      />
-      <div v-else class="av av--ph" aria-hidden="true" />
-      <div>
-        <h1 class="title">{{ peer.displayName }}</h1>
-        <p class="sub">Личные сообщения</p>
-      </div>
+      <RouterLink :to="`/users/${peer.id}`" class="head-profile" title="Открыть профиль">
+        <img
+          v-if="peer.avatarUrl"
+          class="av"
+          :src="mediaUrl(peer.avatarUrl)"
+          alt=""
+          width="40"
+          height="40"
+        />
+        <div v-else class="av av--ph" aria-hidden="true" />
+        <div>
+          <h1 class="title">{{ peer.displayName }}</h1>
+          <p class="sub">Личные сообщения</p>
+        </div>
+      </RouterLink>
     </header>
 
     <p v-if="err" class="err">{{ err }}</p>
@@ -160,7 +217,16 @@ onUnmounted(() => disconnectSocket())
         :class="{ 'bubble-wrap--mine': m.fromUserId === user?.id }"
       >
         <div class="bubble">
-          <p class="text">{{ m.content }}</p>
+          <a
+            v-if="m.imageUrl"
+            class="dm-media"
+            :href="mediaUrl(m.imageUrl)"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <img :src="mediaUrl(m.imageUrl)" alt="" class="dm-img" />
+          </a>
+          <p v-if="(m.content || '').trim()" class="text">{{ m.content }}</p>
           <time class="time">{{ fmtWhen(m.createdAt) }}</time>
         </div>
       </div>
@@ -169,14 +235,41 @@ onUnmounted(() => disconnectSocket())
 
     <form v-if="peer && !loading" class="composer" @submit.prevent="send">
       <input
-        v-model="draft"
-        type="text"
-        class="inp"
-        maxlength="2000"
-        placeholder="Сообщение…"
-        autocomplete="off"
+        ref="fileInput"
+        type="file"
+        class="visually-hidden"
+        accept="image/jpeg,image/png,image/gif,image/webp"
+        aria-label="Прикрепить фото"
+        @change="onFileSelected"
       />
-      <button type="submit" class="btn" :disabled="!draft.trim()">Отправить</button>
+      <button
+        type="button"
+        class="attach"
+        title="Прикрепить фото"
+        :disabled="sending"
+        @click="pickPhoto"
+      >
+        <span aria-hidden="true">📎</span>
+      </button>
+      <div class="composer__main">
+        <div v-if="pendingPreview" class="pending-ph">
+          <img :src="pendingPreview" alt="" class="pending-ph__img" />
+          <button type="button" class="pending-ph__x" title="Убрать фото" @click="clearPendingPhoto">
+            ×
+          </button>
+        </div>
+        <input
+          v-model="draft"
+          type="text"
+          class="inp"
+          maxlength="2000"
+          placeholder="Сообщение или подпись к фото…"
+          autocomplete="off"
+        />
+      </div>
+      <button type="submit" class="btn" :disabled="!canSend || sending">
+        {{ sending ? '…' : 'Отправить' }}
+      </button>
     </form>
   </div>
 </template>
@@ -203,6 +296,19 @@ onUnmounted(() => disconnectSocket())
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+.head-profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: inherit;
+  min-width: 0;
+}
+
+.head-profile:hover .title {
+  color: var(--tg-gold);
 }
 
 .av {
@@ -281,12 +387,98 @@ onUnmounted(() => disconnectSocket())
   font-size: 0.9rem;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .composer {
   display: flex;
+  align-items: flex-end;
   gap: 10px;
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--tg-border);
+}
+
+.composer__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attach {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-elevated);
+  color: var(--tg-text);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attach:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pending-ph {
+  position: relative;
+  display: inline-block;
+  max-width: 120px;
+}
+
+.pending-ph__img {
+  display: block;
+  max-width: 120px;
+  max-height: 88px;
+  border-radius: var(--tg-radius-sm);
+  object-fit: cover;
+  border: 1px solid var(--tg-border);
+}
+
+.pending-ph__x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--tg-surface);
+  color: var(--tg-text);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+.dm-media {
+  display: block;
+  margin: 0 0 8px;
+  border-radius: var(--tg-radius-sm);
+  overflow: hidden;
+  max-width: min(100%, 280px);
+}
+
+.dm-img {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .inp {

@@ -6,7 +6,7 @@
 # В .env на сервере: NODE_ENV задаётся здесь; JWT_SECRET, CORS_ORIGINS, TRUST_PROXY=1 и т.д.
 
 [Unit]
-Description=VibeTelegram (Node.js API + SPA)
+Description=PrivateCommunity (Node.js API + SPA)
 After=network.target
 
 [Service]

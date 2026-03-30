@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { listAdminEmailsFromEnv } from './admin-emails.js'
+import { migrateSubscriptionTiersFromLegacy } from './subscription-tiers.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataDir = path.join(__dirname, 'data')
@@ -116,6 +117,10 @@ ensureUserColumn('banned', `ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL
 ensureUserColumn('ban_reason', `ALTER TABLE users ADD COLUMN ban_reason TEXT`)
 ensureUserColumn('banned_until', `ALTER TABLE users ADD COLUMN banned_until TEXT`)
 ensureUserColumn('avatar_path', `ALTER TABLE users ADD COLUMN avatar_path TEXT`)
+ensureUserColumn(
+  'show_public_channels',
+  `ALTER TABLE users ADD COLUMN show_public_channels INTEGER NOT NULL DEFAULT 0`
+)
 
 function ensureChatColumn(colName, alterSql) {
   const cols = db.prepare(`PRAGMA table_info(chat_messages)`).all()
@@ -180,6 +185,15 @@ if (!channelColsBlocked.some((c) => c.name === 'blocked_reason')) {
 const channelColsLive = db.prepare(`PRAGMA table_info(channels)`).all()
 if (!channelColsLive.some((c) => c.name === 'live_active')) {
   db.exec(`ALTER TABLE channels ADD COLUMN live_active INTEGER NOT NULL DEFAULT 0`)
+}
+
+let channelColsReact = db.prepare(`PRAGMA table_info(channels)`).all()
+if (!channelColsReact.some((c) => c.name === 'reaction_quick_json')) {
+  db.exec(`ALTER TABLE channels ADD COLUMN reaction_quick_json TEXT`)
+}
+channelColsReact = db.prepare(`PRAGMA table_info(channels)`).all()
+if (!channelColsReact.some((c) => c.name === 'reaction_enabled_json')) {
+  db.exec(`ALTER TABLE channels ADD COLUMN reaction_enabled_json TEXT`)
 }
 
 db.exec(`
@@ -250,6 +264,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_dm_recipient_time ON direct_messages(recipient_id, created_at DESC);
 `)
 
+function ensureDirectMessageColumn(colName, alterSql) {
+  const cols = db.prepare(`PRAGMA table_info(direct_messages)`).all()
+  if (!cols.some((c) => c.name === colName)) {
+    db.exec(alterSql)
+  }
+}
+
+ensureDirectMessageColumn('image_path', `ALTER TABLE direct_messages ADD COLUMN image_path TEXT`)
+
 /** Убрать устаревшее «Общее сообщество» / slug general — ссылки станут /channels/archive-{id}/… */
 function renameLegacyGeneralCommunity() {
   const generalRows = db.prepare(`SELECT id FROM channels WHERE lower(slug) = 'general'`).all()
@@ -311,6 +334,7 @@ function migrateLegacyChannels() {
 
 migrateLegacyChannels()
 renameLegacyGeneralCommunity()
+migrateSubscriptionTiersFromLegacy()
 
 /** Вызывать из index.js после load-env — иначе ADMIN_EMAILS может быть пустым (порядок ESM-импортов). */
 export function syncAdminRolesFromEnv() {

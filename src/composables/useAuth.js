@@ -119,6 +119,15 @@ export function useAuth() {
     return r === 'owner' || r === 'admin'
   })
 
+  /** Модерация комментариев и чата в текущем канале (по маршруту). */
+  const canModerateThisChannel = computed(() => {
+    if (isAdmin.value) return true
+    const c = currentChannel.value
+    if (!c?.canAccess) return false
+    const r = c.myRole
+    return r === 'owner' || r === 'admin' || r === 'moderator'
+  })
+
   async function refreshMe() {
     authPreparePromise = null
     await hydrateSessionFromApi()
@@ -174,10 +183,12 @@ export function useAuth() {
     authPreparePromise = null
   }
 
-  async function updateProfile(displayName) {
+  /** @param {string | { displayName?: string, showPublicChannels?: boolean }} updates */
+  async function updateProfile(updates) {
+    const body = typeof updates === 'string' ? { displayName: updates } : { ...updates }
     const res = await api('/api/me', {
       method: 'PATCH',
-      body: { displayName },
+      body,
     })
     const data = await parseJson(res)
     if (!res.ok) throw new Error(data?.error || 'Не удалось сохранить')
@@ -194,12 +205,14 @@ export function useAuth() {
     await refreshMe()
   }
 
-  async function activateSubscription(plan, channelKey) {
+  async function activateSubscription(plan, channelKey, tierId) {
     const key = String(channelKey || '').trim()
     if (!key) throw new Error('Не выбран канал')
+    const tid = Number(tierId)
+    if (!Number.isFinite(tid) || tid <= 0) throw new Error('Не выбран уровень подписки')
     const res = await api(`/api/channels/${encodeURIComponent(key)}/subscription/activate`, {
       method: 'POST',
-      body: { plan },
+      body: { plan, tierId: tid },
     })
     const data = await parseJson(res)
     if (!res.ok) throw new Error(data?.error || 'Ошибка активации')
@@ -227,6 +240,7 @@ export function useAuth() {
     isBanned,
     canPost,
     canDeleteChannelPosts,
+    canModerateThisChannel,
     isAdmin,
     isStaff,
     prepareAuth,

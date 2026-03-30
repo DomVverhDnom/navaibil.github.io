@@ -1,4 +1,5 @@
 import { db } from './db.js'
+import { normalizeChannelReactions, clientReactionPayload } from './reactions.js'
 
 /** Нормализация ссылок для шапки канала (макс. 12 шт.). */
 export function normalizeSocialLinksInput(input) {
@@ -41,6 +42,10 @@ export function hydrateChannelRow(row) {
     blockedReason: br1,
     blocked_reason: br2,
     live_active,
+    reaction_quick_json,
+    reaction_enabled_json,
+    reactionQuickJson,
+    reactionEnabledJson,
     ...rest
   } = row
   const blocked = Number(blockedRaw) === 1
@@ -48,7 +53,20 @@ export function hydrateChannelRow(row) {
   const liveActive =
     Number(rest.liveActive ?? live_active ?? 0) === 1 || rest.liveActive === true
   const { liveActive: _la, ...restNoLive } = rest
-  return { ...restNoLive, socialLinks, blocked, blockedReason, liveActive }
+  const rq = reaction_quick_json ?? reactionQuickJson ?? null
+  const re = reaction_enabled_json ?? reactionEnabledJson ?? null
+  const { quick, enabled } = normalizeChannelReactions(rq, re)
+  const reactions = clientReactionPayload(quick, enabled)
+  return {
+    ...restNoLive,
+    socialLinks,
+    blocked,
+    blockedReason,
+    liveActive,
+    reactionQuick: quick,
+    reactionEnabled: enabled,
+    reactions,
+  }
 }
 
 export function normalizeChannelRole(role) {
@@ -133,6 +151,13 @@ export function canManageMemberRoles(actorUserId, channelId) {
   return r === 'owner' || r === 'admin'
 }
 
+/** Модерация ленты и чата канала: владелец, админ или модератор канала (и глобальный админ сайта). */
+export function canModerateChannelContent(actorUserId, channelId) {
+  if (isSiteAdminUser(actorUserId)) return true
+  const r = getChannelMemberRole(actorUserId, channelId)
+  return r === 'owner' || r === 'admin' || r === 'moderator'
+}
+
 export function fetchChannel(channelId) {
   const row = db
     .prepare(
@@ -140,7 +165,8 @@ export function fetchChannel(channelId) {
               COALESCE(c.price_month, 0) AS priceMonth, COALESCE(c.price_year, 0) AS priceYear,
               c.banner_path AS bannerPath, c.social_links AS socialLinksJson,
               COALESCE(c.blocked, 0) AS blocked, c.blocked_reason AS blockedReason,
-              COALESCE(c.live_active, 0) AS liveActive
+              COALESCE(c.live_active, 0) AS liveActive,
+              c.reaction_quick_json AS reactionQuickJson, c.reaction_enabled_json AS reactionEnabledJson
        FROM channels c WHERE c.id = ?`
     )
     .get(channelId)
@@ -156,7 +182,8 @@ export function fetchChannelBySlug(slug) {
               COALESCE(c.price_month, 0) AS priceMonth, COALESCE(c.price_year, 0) AS priceYear,
               c.banner_path AS bannerPath, c.social_links AS socialLinksJson,
               COALESCE(c.blocked, 0) AS blocked, c.blocked_reason AS blockedReason,
-              COALESCE(c.live_active, 0) AS liveActive
+              COALESCE(c.live_active, 0) AS liveActive,
+              c.reaction_quick_json AS reactionQuickJson, c.reaction_enabled_json AS reactionEnabledJson
        FROM channels c WHERE lower(c.slug) = ?`
     )
     .get(s)
@@ -173,11 +200,14 @@ export function listChannelsForUser(userId) {
               c.banner_path AS bannerPath, c.social_links AS socialLinksJson,
               COALESCE(c.blocked, 0) AS blocked, c.blocked_reason AS blockedReason,
               COALESCE(c.live_active, 0) AS liveActive,
+              c.reaction_quick_json AS reactionQuickJson, c.reaction_enabled_json AS reactionEnabledJson,
               cm.role AS membershipRole,
-              cs.plan AS subPlan, cs.status AS subStatus, cs.current_period_end AS subEnd
+              cs.plan AS subPlan, cs.status AS subStatus, cs.current_period_end AS subEnd,
+              cs.tier_id AS subTierId, t.name AS subTierName, t.sort_order AS subTierSort
            FROM channels c
            LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?
            LEFT JOIN channel_subscriptions cs ON cs.channel_id = c.id AND cs.user_id = ?
+           LEFT JOIN channel_subscription_tiers t ON t.id = cs.tier_id
            ORDER BY c.name COLLATE NOCASE ASC`
         )
         .all(userId, userId)
@@ -188,11 +218,14 @@ export function listChannelsForUser(userId) {
                   c.banner_path AS bannerPath, c.social_links AS socialLinksJson,
                   COALESCE(c.blocked, 0) AS blocked, c.blocked_reason AS blockedReason,
                   COALESCE(c.live_active, 0) AS liveActive,
+                  c.reaction_quick_json AS reactionQuickJson, c.reaction_enabled_json AS reactionEnabledJson,
                   cm.role AS membershipRole,
-                  cs.plan AS subPlan, cs.status AS subStatus, cs.current_period_end AS subEnd
+                  cs.plan AS subPlan, cs.status AS subStatus, cs.current_period_end AS subEnd,
+                  cs.tier_id AS subTierId, t.name AS subTierName, t.sort_order AS subTierSort
            FROM channels c
            INNER JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?
            LEFT JOIN channel_subscriptions cs ON cs.channel_id = c.id AND cs.user_id = ?
+           LEFT JOIN channel_subscription_tiers t ON t.id = cs.tier_id
            WHERE COALESCE(c.blocked, 0) = 0
            ORDER BY c.name COLLATE NOCASE ASC`
         )
@@ -208,6 +241,8 @@ export function listChannelsForUser(userId) {
     }
     const chBlocked = Number(r.blocked) === 1
     const canAccess = globalAdmin ? true : !chBlocked && (staff || subActive)
+    const { quick, enabled } = normalizeChannelReactions(r.reactionQuickJson, r.reactionEnabledJson)
+    const reactions = clientReactionPayload(quick, enabled)
     return {
       id: r.id,
       slug: r.slug,
@@ -224,6 +259,9 @@ export function listChannelsForUser(userId) {
       liveActive: Number(r.liveActive) === 1,
       myRole: effectiveRole,
       siteAdminAccess: globalAdmin || undefined,
+      reactionQuick: quick,
+      reactionEnabled: enabled,
+      reactions,
       subscription: staff
         ? null
         : {
@@ -231,6 +269,9 @@ export function listChannelsForUser(userId) {
             plan: r.subPlan || null,
             currentPeriodEnd: r.subEnd || null,
             status: r.subStatus || null,
+            tierId: r.subTierId ?? null,
+            tierName: r.subTierName || null,
+            tierSort: r.subTierSort != null ? Number(r.subTierSort) : null,
           },
       canAccess,
     }
@@ -240,12 +281,24 @@ export function listChannelsForUser(userId) {
 export function channelSubPayload(channelId, userId) {
   const staff = isChannelStaff(userId, channelId)
   if (staff) {
-    return { active: true, plan: null, currentPeriodEnd: null, status: 'staff', canceledAt: null }
+    return {
+      active: true,
+      plan: null,
+      currentPeriodEnd: null,
+      status: 'staff',
+      canceledAt: null,
+      tierId: null,
+      tierName: null,
+      tierSort: null,
+    }
   }
   const row = db
     .prepare(
-      `SELECT plan, status, current_period_end AS currentPeriodEnd, canceled_at AS canceledAt
-       FROM channel_subscriptions WHERE channel_id = ? AND user_id = ?`
+      `SELECT cs.plan, cs.status, cs.current_period_end AS currentPeriodEnd, cs.canceled_at AS canceledAt,
+              cs.tier_id AS tierId, t.name AS tierName, t.sort_order AS tierSort
+       FROM channel_subscriptions cs
+       LEFT JOIN channel_subscription_tiers t ON t.id = cs.tier_id
+       WHERE cs.channel_id = ? AND cs.user_id = ?`
     )
     .get(channelId, userId)
   if (!row) return null
@@ -256,6 +309,9 @@ export function channelSubPayload(channelId, userId) {
     currentPeriodEnd: row.currentPeriodEnd,
     status: row.status,
     canceledAt: row.canceledAt,
+    tierId: row.tierId ?? null,
+    tierName: row.tierName || null,
+    tierSort: row.tierSort != null ? Number(row.tierSort) : null,
   }
 }
 

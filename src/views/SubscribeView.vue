@@ -11,9 +11,11 @@ const { isAuthenticated, isSubscribed, currentChannel, activateSubscription, loa
 const channelKey = computed(() => String(route.params.channelKey || '').trim())
 const channelName = ref('')
 const channelDescription = ref('')
-const channelPrices = ref({ month: 0, year: 0 })
+/** @type {import('vue').Ref<Array<{ id: number, sortOrder: number, name: string, priceMonth: number, priceYear: number }>>} */
+const channelTiers = ref([])
 const isDev = import.meta.env.DEV
-const billing = ref('month')
+const selectedTierId = ref(null)
+const billingPeriod = ref('month')
 const err = ref('')
 const busy = ref(false)
 const channelBlocked = ref(false)
@@ -24,9 +26,15 @@ function fmtRub(n) {
   return `${new Intl.NumberFormat('ru-RU').format(x)} ₽`
 }
 
-const selectablePlans = computed(() => {
-  const m = channelPrices.value.month
-  const y = channelPrices.value.year
+const selectedTier = computed(() => channelTiers.value.find((t) => t.id === selectedTierId.value) || null)
+
+const billingChoices = computed(() => {
+  const t = selectedTier.value
+  if (!t) {
+    return [{ id: 'month', name: 'Доступ', price: 'Бесплатно', period: 'без оплаты', highlight: true, badge: null }]
+  }
+  const m = Number(t.priceMonth) || 0
+  const y = Number(t.priceYear) || 0
   if (m === 0 && y === 0) {
     return [
       {
@@ -77,10 +85,24 @@ const selectablePlans = computed(() => {
 })
 
 watch(
-  selectablePlans,
+  channelTiers,
+  (tiers) => {
+    if (!tiers?.length) {
+      selectedTierId.value = null
+      return
+    }
+    if (!tiers.some((t) => t.id === selectedTierId.value)) {
+      selectedTierId.value = tiers[0].id
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  billingChoices,
   (plans) => {
-    if (!plans.some((p) => p.id === billing.value)) {
-      billing.value = plans[0]?.id || 'month'
+    if (!plans.some((p) => p.id === billingPeriod.value)) {
+      billingPeriod.value = plans[0]?.id || 'month'
     }
   },
   { immediate: true }
@@ -94,10 +116,7 @@ async function loadSummary() {
   if (res.ok && data?.channel) {
     channelName.value = data.channel.name
     channelDescription.value = data.channel.description || ''
-    channelPrices.value = {
-      month: Number(data.channel.priceMonth) || 0,
-      year: Number(data.channel.priceYear) || 0,
-    }
+    channelTiers.value = Array.isArray(data.channel.subscriptionTiers) ? data.channel.subscriptionTiers : []
     channelBlocked.value = !!data.channel.blocked
     channelBlockedReason.value = data.channel.blockedReason || ''
   } else {
@@ -128,8 +147,8 @@ async function activate() {
   }
   busy.value = true
   try {
-    const plan = billing.value === 'year' ? 'year' : 'month'
-    await activateSubscription(plan, k)
+    const plan = billingPeriod.value === 'year' ? 'year' : 'month'
+    await activateSubscription(plan, k, selectedTierId.value)
     router.push({ name: 'channel-feed', params: { channelKey: k } })
   } catch (e) {
     err.value = e.message || 'Ошибка'
@@ -157,7 +176,7 @@ function fmt(iso) {
       </h1>
       <p class="page__lead">
         <template v-if="channelName">Канал: <strong>{{ channelName }}</strong> ({{ channelKey }}). </template>
-        Тарифы задаёт владелец канала. После оплаты (или тестовой активации) откроются лента и чат.
+        Уровни и цены задаёт владелец канала. После оплаты (или тестовой активации) откроются лента и чат.
       </p>
       <p v-if="channelDescription" class="page__desc">{{ channelDescription }}</p>
     </header>
@@ -201,7 +220,8 @@ function fmt(iso) {
         <div class="active__card premium-glow">
           <p class="active__label">Подписка на канал активна</p>
           <p class="active__plan">
-            Тариф:
+            Уровень: <strong>{{ currentChannel?.subscription?.tierName || '—' }}</strong>
+            · период:
             <strong>{{ currentChannel?.subscription?.plan === 'year' ? 'годовой' : 'месячный' }}</strong>
           </p>
           <p class="active__until">До {{ fmt(currentChannel?.subscription?.currentPeriodEnd) }}</p>
@@ -215,19 +235,49 @@ function fmt(iso) {
       </div>
 
       <div v-else class="plans">
+        <p v-if="!channelTiers.length" class="err err--box">
+          У канала нет настроенных уровней подписки. Владелец может добавить их в разделе «Управление каналом».
+        </p>
+        <template v-else>
+        <p class="tiers-block-title">Уровень подписки</p>
         <div
-          v-for="p in selectablePlans"
+          v-for="t in channelTiers"
+          :key="t.id"
+          class="tier-pick"
+          :class="{ 'tier-pick--on': selectedTierId === t.id }"
+          role="button"
+          tabindex="0"
+          @click="selectedTierId = t.id"
+          @keydown.enter="selectedTierId = t.id"
+          @keydown.space.prevent="selectedTierId = t.id"
+        >
+          <div class="tier-pick__radio" :class="{ 'tier-pick__radio--on': selectedTierId === t.id }" />
+          <div class="tier-pick__body">
+            <h2 class="tier-pick__name">{{ t.name }}</h2>
+            <p class="tier-pick__meta">Уровень {{ t.sortOrder }}</p>
+            <p v-if="!t.priceMonth && !t.priceYear" class="tier-pick__price">Бесплатно</p>
+            <p v-else class="tier-pick__price">
+              <template v-if="t.priceMonth">{{ fmtRub(t.priceMonth) }} <span class="plan__period">/ мес</span></template>
+              <template v-if="t.priceMonth && t.priceYear"> · </template>
+              <template v-if="t.priceYear">{{ fmtRub(t.priceYear) }} <span class="plan__period">/ год</span></template>
+            </p>
+          </div>
+        </div>
+
+        <p class="tiers-block-title tiers-block-title--period">Период списания</p>
+        <div
+          v-for="p in billingChoices"
           :key="p.id"
           class="plan"
           :class="{ 'plan--highlight': p.highlight }"
           role="button"
           tabindex="0"
-          @click="billing = p.id"
-          @keydown.enter="billing = p.id"
-          @keydown.space.prevent="billing = p.id"
+          @click="billingPeriod = p.id"
+          @keydown.enter="billingPeriod = p.id"
+          @keydown.space.prevent="billingPeriod = p.id"
         >
           <span v-if="p.badge" class="plan__badge">{{ p.badge }}</span>
-          <div class="plan__radio" :class="{ 'plan__radio--on': billing === p.id }" />
+          <div class="plan__radio" :class="{ 'plan__radio--on': billingPeriod === p.id }" />
           <div class="plan__body">
             <h2 class="plan__name">{{ p.name }}</h2>
             <p class="plan__price">{{ p.price }} <span class="plan__period">{{ p.period }}</span></p>
@@ -244,11 +294,12 @@ function fmt(iso) {
         <button
           type="button"
           class="btn btn--primary btn--block premium-glow"
-          :disabled="busy || loading"
+          :disabled="busy || loading || !channelTiers.length"
           @click="activate"
         >
           {{ busy ? 'Подключение…' : 'Подключить подписку' }}
         </button>
+        </template>
         <p class="fine">
           <template v-if="isDev">
             В режиме разработки оплата не списывается: сервер сразу выдаёт тестовый период для этого канала.
@@ -369,6 +420,76 @@ function fmt(iso) {
   flex-wrap: wrap;
 }
 
+.tiers-block-title {
+  margin: 0 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tg-muted);
+}
+
+.tiers-block-title--period {
+  margin-top: 20px;
+}
+
+.tier-pick {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-elevated);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.tier-pick:hover,
+.tier-pick:focus-visible {
+  border-color: color-mix(in srgb, var(--tg-accent) 35%, var(--tg-border));
+}
+
+.tier-pick--on {
+  border-color: color-mix(in srgb, var(--tg-accent) 55%, var(--tg-border));
+  background: color-mix(in srgb, var(--tg-accent-soft) 40%, var(--tg-elevated));
+}
+
+.tier-pick__radio {
+  width: 18px;
+  height: 18px;
+  margin-top: 4px;
+  border-radius: 50%;
+  border: 2px solid var(--tg-border);
+  flex-shrink: 0;
+}
+
+.tier-pick__radio--on {
+  border-color: var(--tg-accent);
+  box-shadow: inset 0 0 0 3px var(--tg-surface), inset 0 0 0 8px var(--tg-accent);
+}
+
+.tier-pick__name {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.tier-pick__meta {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  color: var(--tg-muted);
+}
+
+.tier-pick__price {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
 .plans {
   display: flex;
   flex-direction: column;
@@ -461,6 +582,13 @@ function fmt(iso) {
   margin: 0;
   font-size: 0.88rem;
   color: #ff8a80;
+}
+
+.err--box {
+  padding: 14px;
+  border-radius: var(--tg-radius-md);
+  background: color-mix(in srgb, #ff8a80 8%, var(--tg-surface));
+  border: 1px solid color-mix(in srgb, #ff8a80 25%, var(--tg-border));
 }
 
 .btn {

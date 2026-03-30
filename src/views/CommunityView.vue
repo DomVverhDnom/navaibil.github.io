@@ -1,17 +1,18 @@
 <script setup>
-import { reactive, ref, watch, onUnmounted, computed, nextTick } from 'vue'
+import { reactive, ref, watch, onUnmounted, onMounted, computed, nextTick } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { io } from 'socket.io-client'
 import { useAuth } from '../composables/useAuth'
 import { api, apiBase, parseJson, apiForm } from '../lib/api'
 import { mediaUrl } from '../lib/mediaUrl'
 import { formatPostHtml } from '../lib/postFormat'
+import { REACTION_CATALOG } from '../lib/reactionsCatalog'
 import CommunityGate from '../components/CommunityGate.vue'
 import PostComments from '../components/PostComments.vue'
 import PostImageSlider from '../components/PostImageSlider.vue'
 
 const route = useRoute()
-const { isSubscribed, token, canPost, canDeleteChannelPosts } = useAuth()
+const { isSubscribed, token, canPost, canDeleteChannelPosts, canModerateThisChannel } = useAuth()
 
 const channelKey = computed(() => String(route.params.channelKey || '').trim())
 const channelId = ref(null)
@@ -19,16 +20,20 @@ const channelTitle = ref('')
 const channelBannerPath = ref(null)
 const channelDescription = ref('')
 const channelSocialLinks = ref([])
-
-const REACTION_BAR = [
-  { kind: 'like', emoji: '👍' },
-  { kind: 'heart', emoji: '❤️' },
-  { kind: 'fire', emoji: '🔥' },
-  { kind: 'clap', emoji: '👏' },
-  { kind: '100', emoji: '💯' },
-]
+/** @type {import('vue').Ref<Array<{ id: number, sortOrder: number, name: string, priceMonth: number, priceYear: number }>>} */
+const subscriptionTiers = ref([])
 
 const MAX_POST_PHOTOS = 12
+
+function defaultChannelReactions() {
+  const bar = REACTION_CATALOG.slice(0, 5).map((x) => ({ kind: x.kind, emoji: x.emoji }))
+  const qs = new Set(bar.map((x) => x.kind))
+  const overflow = REACTION_CATALOG.filter((x) => !qs.has(x.kind)).map((x) => ({ kind: x.kind, emoji: x.emoji }))
+  return { bar, overflow }
+}
+
+const channelReactions = ref(defaultChannelReactions())
+const reactionPickerPostId = ref(null)
 
 const posts = ref([])
 const postDraft = ref('')
@@ -38,6 +43,12 @@ const postTextarea = ref(null)
 const loading = ref(false)
 const postError = ref('')
 const commentsByPost = reactive({})
+/** @type {Record<number, { hasMoreOlder?: boolean, total?: number | null, loadingOlder?: boolean }>} */
+const commentsMeta = reactive({})
+
+const COMMENTS_PAGE = 50
+/** Пустая строка = все подписчики; иначе sort_order уровня */
+const postMinTierSort = ref('')
 
 let commentSocket = null
 const origin = apiBase() || undefined
@@ -56,6 +67,23 @@ function pushComment(postId, comment) {
   commentsByPost[postId].push(comment)
   const post = posts.value.find((x) => x.id === postId)
   if (post) post.commentCount = (Number(post.commentCount) || 0) + 1
+}
+
+function removeCommentFromPost(postId, commentId) {
+  const arr = commentsByPost[postId]
+  let removedFromList = false
+  if (arr?.length) {
+    const i = arr.findIndex((c) => c.id === commentId)
+    if (i !== -1) {
+      arr.splice(i, 1)
+      removedFromList = true
+    }
+  }
+  const post = posts.value.find((x) => x.id === postId)
+  if (!post) return
+  if (removedFromList || !arr) {
+    post.commentCount = Math.max(0, (Number(post.commentCount) || 0) - 1)
+  }
 }
 
 function onPhotoChange(e) {
@@ -114,6 +142,51 @@ function insertLinePrefix(prefix) {
   })
 }
 
+function insertHorizontalRule() {
+  const el = postTextarea.value
+  if (!el) return
+  const v = postDraft.value
+  const start = el.selectionStart ?? 0
+  const pad = start > 0 && v[start - 1] !== '\n' ? '\n' : ''
+  const ins = `${pad}---\n`
+  postDraft.value = v.slice(0, start) + ins + v.slice(el.selectionEnd ?? start)
+  nextTick(() => {
+    el.focus()
+    const pos = start + ins.length
+    el.setSelectionRange(pos, pos)
+  })
+}
+
+function insertBlockQuoteLine() {
+  insertLinePrefix('> ')
+}
+
+function onComposerKeydown(e) {
+  if (!(e.ctrlKey || e.metaKey)) return
+  const k = e.key.toLowerCase()
+  if (k === 'b') {
+    e.preventDefault()
+    wrapSelection('**', '**')
+  } else if (k === 'i') {
+    e.preventDefault()
+    wrapSelection('*', '*')
+  }
+}
+
+function toggleReactionPicker(postId) {
+  reactionPickerPostId.value = reactionPickerPostId.value === postId ? null : postId
+}
+
+function onDocumentClickClosePicker(e) {
+  const t = e?.target
+  if (t && typeof t.closest === 'function' && t.closest('.react-more-wrap')) return
+  reactionPickerPostId.value = null
+}
+
+onMounted(() => {
+  document.addEventListener('click', onDocumentClickClosePicker)
+})
+
 function insertLink() {
   const url = window.prompt('Адрес ссылки (https://…)')
   if (url == null) return
@@ -164,12 +237,30 @@ async function loadSummary() {
   if (!k) return
   const res = await api(`/api/channels/${encodeURIComponent(k)}/summary`)
   const data = await parseJson(res)
-  if (res.ok && data?.channel) {
+    if (res.ok && data?.channel) {
     channelId.value = data.channel.id
     channelTitle.value = data.channel.name || ''
     channelBannerPath.value = data.channel.bannerPath || null
     channelDescription.value = data.channel.description || ''
     channelSocialLinks.value = Array.isArray(data.channel.socialLinks) ? data.channel.socialLinks : []
+    subscriptionTiers.value = Array.isArray(data.channel.subscriptionTiers)
+      ? data.channel.subscriptionTiers.map((t) => ({
+          id: t.id,
+          sortOrder: t.sortOrder,
+          name: t.name,
+          priceMonth: t.priceMonth,
+          priceYear: t.priceYear,
+        }))
+      : []
+    const r = data.channel.reactions
+    if (r?.bar?.length) {
+      channelReactions.value = {
+        bar: r.bar.map((x) => ({ kind: x.kind, emoji: x.emoji })),
+        overflow: Array.isArray(r.overflow) ? r.overflow.map((x) => ({ kind: x.kind, emoji: x.emoji })) : [],
+      }
+    } else {
+      channelReactions.value = defaultChannelReactions()
+    }
   }
 }
 
@@ -205,6 +296,13 @@ async function deletePost(p) {
   }
   posts.value = posts.value.filter((x) => x.id !== p.id)
   delete commentsByPost[p.id]
+  delete commentsMeta[p.id]
+}
+
+function tierLabelForPost(sort) {
+  if (sort == null) return ''
+  const t = subscriptionTiers.value.find((x) => x.sortOrder === Number(sort))
+  return t ? `От «${t.name}»` : `Уровень ${sort}`
 }
 
 async function createPost() {
@@ -215,6 +313,8 @@ async function createPost() {
   postError.value = ''
   const fd = new FormData()
   fd.append('content', t)
+  const mts = String(postMinTierSort.value || '').trim()
+  if (mts) fd.append('minTierSort', mts)
   for (const f of files) fd.append('photos', f)
   const res = await apiForm(`/api/channels/${encodeURIComponent(k)}/posts`, fd)
   const data = await parseJson(res)
@@ -251,16 +351,46 @@ async function togglePostPin(p) {
   }
 }
 
-async function fetchComments(postId) {
+async function fetchComments(postId, opts = {}) {
   const k = channelKey.value
   if (!k) return
-  const res = await api(`/api/channels/${encodeURIComponent(k)}/posts/${postId}/comments`)
+  const beforeId = opts.beforeId
+  const qs = new URLSearchParams()
+  qs.set('limit', String(COMMENTS_PAGE))
+  if (beforeId != null) qs.set('beforeId', String(beforeId))
+  const res = await api(
+    `/api/channels/${encodeURIComponent(k)}/posts/${postId}/comments?${qs}`
+  )
   const data = await parseJson(res)
-  if (res.ok) {
-    const list = data.comments || []
+  if (!res.ok) return
+  const list = data.comments || []
+  if (beforeId != null) {
+    const cur = commentsByPost[postId] || []
+    commentsByPost[postId] = [...list, ...cur]
+    commentsMeta[postId] = {
+      ...commentsMeta[postId],
+      hasMoreOlder: !!data.hasMoreOlder,
+    }
+  } else {
     commentsByPost[postId] = list
-    const post = posts.value.find((x) => x.id === postId)
-    if (post) post.commentCount = list.length
+    commentsMeta[postId] = {
+      hasMoreOlder: !!data.hasMoreOlder,
+      total: data.total != null ? Number(data.total) : null,
+      loadingOlder: false,
+    }
+  }
+}
+
+async function loadOlderComments(postId) {
+  const arr = commentsByPost[postId]
+  const meta = commentsMeta[postId]
+  if (!arr?.length || !meta?.hasMoreOlder || meta.loadingOlder) return
+  commentsMeta[postId] = { ...meta, loadingOlder: true }
+  try {
+    await fetchComments(postId, { beforeId: arr[0].id })
+  } finally {
+    const m = commentsMeta[postId]
+    if (m) commentsMeta[postId] = { ...m, loadingOlder: false }
   }
 }
 
@@ -288,6 +418,7 @@ async function toggleReaction(post, kind) {
     return
   }
   applyReactionToPost(data.postId, data.reactionCounts, data.myReaction)
+  reactionPickerPostId.value = null
 }
 
 function reactionCount(post, kind) {
@@ -325,6 +456,13 @@ function connectCommentSocket() {
     if (!sameLiveChannelId(cid, channelId.value) || !comment) return
     pushComment(postId, comment)
   })
+  commentSocket.on('post:comment:remove', (payload) => {
+    const cid = payload?.channelId
+    const postId = payload?.postId
+    const commentId = payload?.commentId
+    if (!sameLiveChannelId(cid, channelId.value) || postId == null || commentId == null) return
+    removeCommentFromPost(postId, commentId)
+  })
   commentSocket.on('post:react', (payload) => {
     const cid = payload?.channelId
     const postId = payload?.postId
@@ -342,6 +480,7 @@ function connectCommentSocket() {
     if (!sameLiveChannelId(cid, channelId.value) || postId == null) return
     posts.value = posts.value.filter((x) => x.id !== postId)
     delete commentsByPost[postId]
+    delete commentsMeta[postId]
   })
   commentSocket.on('post:pin', (payload) => {
     const cid = payload?.channelId
@@ -372,6 +511,7 @@ watch(
   [channelKey, isSubscribed, token],
   async () => {
     Object.keys(commentsByPost).forEach((k) => delete commentsByPost[k])
+    Object.keys(commentsMeta).forEach((k) => delete commentsMeta[k])
     posts.value = []
     postError.value = ''
     await loadSummary()
@@ -383,6 +523,7 @@ watch(
 )
 
 onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClickClosePicker)
   disconnectCommentSocket()
   for (const it of photoItems.value) {
     if (it?.url) URL.revokeObjectURL(it.url)
@@ -393,17 +534,18 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <CommunityGate>
-      <header class="head">
+      <header class="head premium-glow">
         <div
           class="head__cover"
           :class="{ 'head__cover--empty': !channelBannerPath }"
           :style="channelBannerPath ? { backgroundImage: `url(${mediaUrl(channelBannerPath)})` } : {}"
         />
         <div class="head__inner">
-          <h1 class="head__title">{{ channelTitle || 'Лента канала' }}</h1>
+          <p class="head__kicker">Лента канала</p>
+          <h1 class="head__title">{{ channelTitle || 'Канал' }}</h1>
           <p v-if="channelDescription" class="head__desc">{{ channelDescription }}</p>
           <p v-else class="head__subtitle">
-            Посты публикует команда канала. Участники с доступом читают ленту, комментируют и общаются в чате.
+            Публикации готовит команда канала. Участники с доступом читают материалы, комментируют и общаются в чате.
           </p>
           <ul v-if="channelSocialLinks.length" class="head__socials" aria-label="Ссылки канала">
             <li v-for="(s, i) in channelSocialLinks" :key="i">
@@ -411,36 +553,74 @@ onUnmounted(() => {
             </li>
           </ul>
           <div class="head__nav">
-            <RouterLink :to="`/channels/${encodeURIComponent(channelKey)}/chat`" class="head__link">
-              Открыть чат канала →
+            <RouterLink :to="`/channels/${encodeURIComponent(channelKey)}/chat`" class="head__chat-btn">
+              <span class="head__chat-ico" aria-hidden="true">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              </span>
+              Чат канала
             </RouterLink>
-            <span class="head__live-soon" title="Прямые эфиры скоро">Прямой эфир · скоро</span>
+            <span class="head__live-soon" title="Прямые эфиры скоро">Эфир · скоро</span>
           </div>
         </div>
       </header>
 
-      <section v-if="canPost" class="composer">
-        <h2 class="section-label">Новый пост (модерация)</h2>
-        <div class="composer__tools" aria-label="Разметка текста">
-          <span class="composer__tools-hint">Оформление:</span>
-          <button type="button" class="composer__tool" @click="wrapSelection('**', '**')">Жирный</button>
-          <button type="button" class="composer__tool" @click="wrapSelection('*', '*')">Курсив</button>
-          <button type="button" class="composer__tool" @click="wrapSelection('`', '`')">Код</button>
-          <button type="button" class="composer__tool" @click="wrapSelection('~~', '~~')">Зачёркнутый</button>
-          <button type="button" class="composer__tool" @click="insertLink">Ссылка</button>
-          <button type="button" class="composer__tool" @click="insertLinePrefix('- ')">Список</button>
+      <section v-if="canPost" class="composer premium-glow">
+        <h2 class="section-label">Новый пост</h2>
+        <p class="composer__lead">Разметка как в мессенджере: **жирный**, *курсив*, `код`, списки, цитата, линия <code class="composer__code-hint">---</code>. Ctrl+B / Ctrl+I.</p>
+        <div class="composer__toolbar" aria-label="Форматирование">
+          <button type="button" class="composer__tbtn" title="Жирный (Ctrl+B)" @click="wrapSelection('**', '**')">
+            <strong>B</strong>
+          </button>
+          <button type="button" class="composer__tbtn" title="Курсив (Ctrl+I)" @click="wrapSelection('*', '*')">
+            <em>I</em>
+          </button>
+          <button type="button" class="composer__tbtn composer__tbtn--mono" title="Код (inline)" @click="wrapSelection('`', '`')">
+            &#96;
+          </button>
+          <button type="button" class="composer__tbtn" title="Зачёркнутый" @click="wrapSelection('~~', '~~')">
+            <s>S</s>
+          </button>
+          <button type="button" class="composer__tbtn" title="Ссылка" @click="insertLink">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </button>
+          <span class="composer__tsep" aria-hidden="true" />
+          <button type="button" class="composer__tbtn" title="Маркированный список" @click="insertLinePrefix('- ')">•</button>
+          <button type="button" class="composer__tbtn" title="Нумерованный список" @click="insertLinePrefix('1. ')">1.</button>
+          <button type="button" class="composer__tbtn" title="Цитата" @click="insertBlockQuoteLine">❝</button>
+          <button type="button" class="composer__tbtn" title="Разделитель —-" @click="insertHorizontalRule">─</button>
         </div>
         <textarea
           ref="postTextarea"
           v-model="postDraft"
           class="composer__input"
-          rows="4"
+          rows="5"
           maxlength="8000"
-          placeholder="Текст: **жирный**, *курсив*, `код`, ~~зачёркнуто~~, [подпись](https://…). Можно оставить пустым, если только фото."
+          placeholder="Напишите текст поста… **важное**, ссылки [текст](https://…), строка только с --- даст разделитель."
+          @keydown="onComposerKeydown"
         />
         <p class="composer__fmt-hint">
           До {{ MAX_POST_PHOTOS }} фото (JPEG, PNG, GIF, WebP). Свайп или стрелки в ленте перелистывают снимки.
         </p>
+        <div v-if="subscriptionTiers.length" class="composer__tier">
+          <label class="composer__tier-lab" for="post-min-tier">Видимость поста</label>
+          <select
+            id="post-min-tier"
+            v-model="postMinTierSort"
+            class="composer__tier-select"
+          >
+            <option value="">Все подписчики</option>
+            <option
+              v-for="t in [...subscriptionTiers].sort((a, b) => a.sortOrder - b.sortOrder)"
+              :key="t.id"
+              :value="String(t.sortOrder)"
+            >
+              Только от «{{ t.name }}» (ур. {{ t.sortOrder }})
+            </option>
+          </select>
+          <p class="composer__tier-hint">
+            Подписчики с уровнем ниже не увидят пост в ленте (и не откроют комментарии).
+          </p>
+        </div>
         <div class="composer__file">
           <label class="tg-file-btn" :class="{ 'tg-file-btn--disabled': loading }">
             <input
@@ -469,7 +649,7 @@ onUnmounted(() => {
         <div class="composer__row">
           <button
             type="button"
-            class="btn btn--gold"
+            class="btn btn--publish"
             :disabled="loading || (!postDraft.trim() && !photoItems.length)"
             @click="createPost"
           >
@@ -484,7 +664,7 @@ onUnmounted(() => {
         <RouterLink :to="`/channels/${encodeURIComponent(channelKey)}/chat`">чате канала</RouterLink>.
       </p>
 
-      <h2 class="section-label">Лента</h2>
+      <h2 class="section-label section-label--feed">Лента</h2>
       <div class="feed">
         <article v-for="p in posts" :key="p.id" class="post" :class="{ 'post--pinned': !!p.pinnedAt }">
           <div class="post__meta">
@@ -500,6 +680,9 @@ onUnmounted(() => {
             <div class="post__meta-text">
               <span class="post__author">{{ p.authorName }}</span>
               <span class="post__time">{{ fmtWhen(p.createdAt) }}</span>
+              <span v-if="p.minTierSort != null" class="post__tier-badge" :title="'Минимальный уровень подписки'"
+                >{{ tierLabelForPost(p.minTierSort) }}</span
+              >
               <span v-if="p.pinnedAt" class="post__pin-badge" title="Закреплён администратором канала">Закреплён</span>
             </div>
             <div v-if="canDeleteChannelPosts" class="post__actions">
@@ -520,9 +703,9 @@ onUnmounted(() => {
             v-html="formatPostHtml(p.content)"
           />
           <PostImageSlider v-if="postMediaPaths(p).length" :paths="postMediaPaths(p)" class="post__slider" />
-          <div class="post__react" role="group" aria-label="Реакции">
+          <div class="post__react" role="group" aria-label="Реакции" @click.stop>
             <button
-              v-for="r in REACTION_BAR"
+              v-for="r in channelReactions.bar"
               :key="r.kind"
               type="button"
               class="react-btn"
@@ -532,14 +715,45 @@ onUnmounted(() => {
               <span class="react-btn__emoji" aria-hidden="true">{{ r.emoji }}</span>
               <span v-if="reactionCount(p, r.kind)" class="react-btn__cnt">{{ reactionCount(p, r.kind) }}</span>
             </button>
+            <div v-if="channelReactions.overflow.length" class="react-more-wrap">
+              <button
+                type="button"
+                class="react-more-btn"
+                :class="{ 'react-more-btn--open': reactionPickerPostId === p.id }"
+                :aria-expanded="reactionPickerPostId === p.id"
+                aria-label="Ещё реакции"
+                @click.stop="toggleReactionPicker(p.id)"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+              </button>
+              <div v-if="reactionPickerPostId === p.id" class="react-popover" @click.stop>
+                <button
+                  v-for="r in channelReactions.overflow"
+                  :key="r.kind"
+                  type="button"
+                  class="react-popover__btn"
+                  :class="{ 'react-popover__btn--mine': p.myReaction === r.kind }"
+                  @click="toggleReaction(p, r.kind)"
+                >
+                  <span class="react-popover__emoji">{{ r.emoji }}</span>
+                  <span class="react-popover__kind">{{ r.kind }}</span>
+                </button>
+              </div>
+            </div>
           </div>
           <PostComments
             :channel-key="channelKey"
             :post-id="p.id"
             :comments="commentsByPost[p.id] || []"
             :feed-comment-count="p.commentCount ?? 0"
+            :has-more-older="commentsMeta[p.id]?.hasMoreOlder ?? false"
+            :comments-total="commentsMeta[p.id]?.total ?? null"
+            :loading-older="commentsMeta[p.id]?.loadingOlder ?? false"
+            :can-moderate="canModerateThisChannel"
             @fetch="fetchComments(p.id)"
+            @loadOlder="loadOlderComments(p.id)"
             @append="onCommentAppend(p.id, $event)"
+            @removed="removeCommentFromPost(p.id, $event)"
           />
         </article>
         <p v-if="!loading && !posts.length" class="empty">
@@ -558,31 +772,45 @@ onUnmounted(() => {
 }
 
 .head {
-  margin-bottom: 22px;
+  margin-bottom: 26px;
   border-radius: var(--tg-radius-lg);
   overflow: hidden;
   border: 1px solid var(--tg-border);
-  background: var(--tg-surface);
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--tg-surface) 88%, var(--tg-accent-soft)),
+    var(--tg-surface)
+  );
+  box-shadow: 0 16px 48px -28px rgba(0, 0, 0, 0.55);
 }
 
 .head__cover {
-  height: 140px;
+  height: 160px;
   background-size: cover;
   background-position: center;
 }
 
 .head__cover--empty {
-  background: linear-gradient(145deg, #1a2533, var(--tg-surface));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--tg-accent) 22%, #12141a), var(--tg-surface));
 }
 
 .head__inner {
-  padding: 16px 18px 18px;
+  padding: 18px 20px 20px;
+}
+
+.head__kicker {
+  margin: 0 0 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--tg-muted);
 }
 
 .head__title {
-  margin: 0 0 6px;
-  font-size: 1.6rem;
-  font-weight: 700;
+  margin: 0 0 8px;
+  font-size: clamp(1.45rem, 3vw, 1.85rem);
+  font-weight: 750;
   letter-spacing: -0.02em;
 }
 
@@ -618,18 +846,51 @@ onUnmounted(() => {
   text-underline-offset: 3px;
 }
 
-.head__link {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--tg-gold);
-}
-
 .head__nav {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 18px;
-  margin-top: 4px;
+  gap: 12px 16px;
+  margin-top: 14px;
+}
+
+.head__chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  border-radius: var(--tg-radius-md);
+  font-size: 0.95rem;
+  font-weight: 750;
+  text-decoration: none;
+  color: var(--tg-on-accent);
+  background: var(--tg-gradient-primary-strong);
+  border: 1px solid color-mix(in srgb, var(--tg-accent-hi) 45%, transparent);
+  box-shadow:
+    0 4px 22px -4px var(--tg-glow),
+    0 0 0 1px color-mix(in srgb, var(--tg-accent) 25%, transparent);
+  transition:
+    transform 0.15s ease,
+    filter 0.15s ease;
+}
+
+.head__chat-btn:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+.head__chat-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  opacity: 0.95;
+}
+
+.head__chat-ico svg {
+  display: block;
+  flex-shrink: 0;
 }
 
 .head__live-soon {
@@ -671,63 +932,100 @@ onUnmounted(() => {
   color: var(--tg-muted);
 }
 
+.section-label--feed {
+  margin-top: 8px;
+  margin-bottom: 14px;
+}
+
 .composer {
-  margin-bottom: 24px;
-  padding: 18px;
+  margin-bottom: 28px;
+  padding: 20px 20px 22px;
   border-radius: var(--tg-radius-lg);
   background: var(--tg-surface);
   border: 1px solid var(--tg-border);
 }
 
-.composer__input {
-  width: 100%;
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border-radius: var(--tg-radius-sm);
-  border: 1px solid var(--tg-border);
+.composer__lead {
+  margin: 0 0 14px;
+  font-size: 0.84rem;
+  color: var(--tg-muted);
+  line-height: 1.5;
+}
+
+.composer__code-hint {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
   background: var(--tg-elevated);
-  color: var(--tg-text);
-  font-family: inherit;
-  font-size: 0.95rem;
-  resize: vertical;
-  min-height: 88px;
 }
 
-.composer__input:focus {
-  outline: none;
-  border-color: color-mix(in srgb, var(--tg-accent) 35%, var(--tg-border));
-}
-
-.composer__tools {
+.composer__toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.composer__tools-hint {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--tg-muted);
-  margin-right: 4px;
-}
-
-.composer__tool {
-  padding: 6px 11px;
-  border-radius: var(--tg-radius-sm);
-  font-size: 0.78rem;
-  font-weight: 600;
-  border: 1px solid var(--tg-border);
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: var(--tg-radius-md);
   background: var(--tg-elevated);
+  border: 1px solid var(--tg-border);
+}
+
+.composer__tbtn {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--tg-radius-sm);
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--tg-text);
   cursor: pointer;
   font-family: inherit;
 }
 
-.composer__tool:hover {
-  border-color: color-mix(in srgb, var(--tg-accent) 40%, var(--tg-border));
-  color: var(--tg-accent);
+.composer__tbtn:hover {
+  background: color-mix(in srgb, var(--tg-accent) 12%, transparent);
+  border-color: var(--tg-accent-line);
+  color: var(--tg-gold);
+}
+
+.composer__tbtn--mono {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-weight: 700;
+}
+
+.composer__tsep {
+  width: 1px;
+  height: 22px;
+  background: var(--tg-border);
+  margin: 0 4px;
+}
+
+.composer__input {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-family: inherit;
+  font-size: 0.96rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.composer__input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--tg-accent) 45%, var(--tg-border));
+  box-shadow: 0 0 0 3px var(--tg-accent-soft);
 }
 
 .composer__fmt-hint {
@@ -803,6 +1101,39 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
+.composer__tier {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--tg-border);
+}
+
+.composer__tier-lab {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--tg-muted);
+  margin-bottom: 6px;
+}
+
+.composer__tier-select {
+  width: 100%;
+  max-width: 420px;
+  padding: 10px 12px;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-elevated);
+  color: var(--tg-text);
+  font-size: 0.9rem;
+}
+
+.composer__tier-hint {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: var(--tg-muted);
+  line-height: 1.4;
+  max-width: 520px;
+}
+
 .composer__row {
   display: flex;
   align-items: center;
@@ -823,14 +1154,22 @@ onUnmounted(() => {
 .feed {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 
 .post {
-  padding: 18px;
+  padding: 20px;
   border-radius: var(--tg-radius-lg);
   background: var(--tg-surface);
   border: 1px solid var(--tg-border);
+  box-shadow: 0 10px 36px -26px rgba(0, 0, 0, 0.5);
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.post:hover {
+  border-color: color-mix(in srgb, var(--tg-accent) 18%, var(--tg-border));
 }
 
 .post--pinned {
@@ -850,6 +1189,18 @@ onUnmounted(() => {
   color: var(--tg-gold);
   background: color-mix(in srgb, var(--tg-gold) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--tg-gold) 28%, transparent);
+}
+
+.post__tier-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 650;
+  color: var(--tg-muted);
+  background: color-mix(in srgb, var(--tg-muted) 12%, transparent);
+  border: 1px solid var(--tg-border);
 }
 
 .post__meta {
@@ -978,6 +1329,18 @@ onUnmounted(() => {
   filter: brightness(1.08);
 }
 
+.post__text--rich :deep(.post-hr) {
+  border: none;
+  height: 1px;
+  margin: 14px 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--tg-accent) 45%, var(--tg-border)),
+    transparent
+  );
+}
+
 .post__slider {
   margin: 0 0 12px;
 }
@@ -985,8 +1348,93 @@ onUnmounted(() => {
 .post__react {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.react-more-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.react-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--tg-muted) 50%, var(--tg-border));
+  background: var(--tg-elevated);
+  color: var(--tg-muted);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.react-more-btn:hover,
+.react-more-btn--open {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--tg-accent) 40%, var(--tg-border));
+  color: var(--tg-gold);
+  background: var(--tg-accent-soft);
+}
+
+.react-popover {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 8px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 200px;
+  max-width: min(92vw, 280px);
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-surface);
+  box-shadow: 0 12px 40px -8px rgba(0, 0, 0, 0.55);
+}
+
+.react-popover__btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid transparent;
+  background: var(--tg-elevated);
+  cursor: pointer;
+  font-size: 0.65rem;
+  color: var(--tg-muted);
+}
+
+.react-popover__btn:hover {
+  border-color: var(--tg-accent-line);
+}
+
+.react-popover__btn--mine {
+  border-color: color-mix(in srgb, var(--tg-accent) 45%, var(--tg-border));
+  background: var(--tg-accent-soft);
+}
+
+.react-popover__emoji {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.react-popover__kind {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .react-btn {
@@ -1049,6 +1497,17 @@ onUnmounted(() => {
 .btn--gold {
   color: var(--tg-on-accent);
   background: var(--tg-gradient-primary);
+}
+
+.btn--publish {
+  color: var(--tg-on-accent);
+  background: var(--tg-gradient-primary-strong);
+  box-shadow: 0 6px 24px -6px var(--tg-glow);
+}
+
+.btn--publish:hover:not(:disabled) {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
 }
 
 .btn:disabled {

@@ -26,13 +26,17 @@ function sanitizeUrl(href) {
 
 const MARK_START = '\uE020'
 const MARK_END = '\uE021'
+const HR_TOKEN = `${MARK_START}hr${MARK_END}`
 
 /**
  * @param {string} raw
  * @returns {string}
  */
 export function formatPostHtml(raw) {
-  let s = escapeHtml(raw ?? '')
+  let t = String(raw ?? '')
+  t = t.replace(/^---\s*$/gm, HR_TOKEN)
+  let s = escapeHtml(t)
+  s = s.split(HR_TOKEN).join('<hr class="post-hr" />')
 
   const codes = []
   s = s.replace(/`([^`\n]+)`/g, (_, inner) => {

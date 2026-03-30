@@ -11,7 +11,7 @@ const props = defineProps({
   fullPage: { type: Boolean, default: false },
 })
 
-const { token, user } = useAuth()
+const { token, user, canModerateThisChannel } = useAuth()
 
 const messages = ref([])
 const input = ref('')
@@ -21,6 +21,7 @@ const channelName = ref('')
 const channelBannerPath = ref(null)
 const replyingTo = ref(null)
 const channelId = ref(null)
+const deletingMsgId = ref(null)
 let socket = null
 
 const origin = apiBase() || undefined
@@ -106,9 +107,15 @@ function connect() {
   socket.on('chat:message', (payload) => {
     const cid = payload?.channelId
     const msg = payload?.message
-    if (!msg || cid !== channelId.value) return
+    if (!msg || Number(cid) !== Number(channelId.value)) return
     messages.value.push(msg)
     nextTick().then(scrollBottom)
+  })
+  socket.on('chat:message:remove', (payload) => {
+    const cid = payload?.channelId
+    const mid = payload?.messageId
+    if (mid == null || Number(cid) !== Number(channelId.value)) return
+    messages.value = messages.value.filter((x) => x.id !== mid)
   })
   socket.connect()
 }
@@ -133,6 +140,27 @@ function startReply(m) {
     id: m.id,
     authorName: m.authorName,
     content: m.content,
+  }
+}
+
+async function removeChatMessage(m) {
+  if (!canModerateThisChannel.value || !m?.id || deletingMsgId.value) return
+  if (!confirm('Удалить это сообщение для всех участников?')) return
+  deletingMsgId.value = m.id
+  statusMsg.value = ''
+  try {
+    const res = await api(
+      `/api/channels/${encodeURIComponent(props.channelKey)}/chat/messages/${m.id}`,
+      { method: 'DELETE' }
+    )
+    const data = await parseJson(res)
+    if (!res.ok) {
+      statusMsg.value = data?.error || 'Не удалось удалить сообщение'
+      return
+    }
+    messages.value = messages.value.filter((x) => x.id !== m.id)
+  } finally {
+    deletingMsgId.value = null
   }
 }
 
@@ -195,7 +223,7 @@ onUnmounted(() => disconnect())
     />
     <header class="chat__head">
       <h2 class="chat__title">{{ channelName || 'Чат канала' }}</h2>
-      <p class="chat__hint">Сообщения видят участники с доступом к этому каналу.</p>
+      <p class="chat__hint">Общение участников с доступом к каналу. Сообщения появляются у всех в реальном времени.</p>
     </header>
     <p v-if="statusMsg" class="chat__status">{{ statusMsg }}</p>
     <div ref="listEl" class="chat__list tg-scroll" role="log" aria-live="polite">
@@ -209,8 +237,8 @@ onUnmounted(() => disconnect())
         <RouterLink
           v-if="canOpenUserProfile(m)"
           class="msg__profile"
-          :to="`/messages/${m.authorId}`"
-          :title="`Сообщения: ${m.authorName}`"
+          :to="`/users/${m.authorId}`"
+          :title="`Профиль: ${m.authorName}`"
         >
           <img
             v-if="m.authorAvatar"
@@ -238,7 +266,7 @@ onUnmounted(() => disconnect())
           <RouterLink
             v-if="canOpenUserProfile(m)"
             class="msg__author msg__author--link"
-            :to="`/messages/${m.authorId}`"
+            :to="`/users/${m.authorId}`"
           >
             {{ m.authorName }}
           </RouterLink>
@@ -255,6 +283,16 @@ onUnmounted(() => disconnect())
           <span class="msg__meta-gap" aria-hidden="true" />
           <span class="msg__time">{{ fmtTime(m.createdAt) }}</span>
           <button type="button" class="msg__reply-btn" @click="startReply(m)">Ответить</button>
+          <button
+            v-if="canModerateThisChannel"
+            type="button"
+            class="msg__mod-del"
+            :disabled="deletingMsgId === m.id"
+            title="Удалить сообщение (модерация)"
+            @click="removeChatMessage(m)"
+          >
+            Удалить
+          </button>
         </div>
         <button
           v-if="m.replyTo"
@@ -481,6 +519,27 @@ onUnmounted(() => disconnect())
 .msg__reply-btn:hover {
   color: var(--tg-gold);
   border-color: color-mix(in srgb, var(--tg-gold) 35%, var(--tg-border));
+}
+
+.msg__mod-del {
+  padding: 2px 8px;
+  border-radius: var(--tg-radius-sm);
+  border: 1px solid color-mix(in srgb, #e57373 45%, var(--tg-border));
+  background: color-mix(in srgb, #e57373 10%, transparent);
+  color: #ffcdd2;
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.msg__mod-del:hover:not(:disabled) {
+  background: color-mix(in srgb, #e57373 22%, transparent);
+}
+
+.msg__mod-del:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .msg__reply-ref {

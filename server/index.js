@@ -28,10 +28,19 @@ import {
   getMembership,
   getChannelMemberRole,
   canManageMemberRoles,
+  canModerateChannelContent,
   normalizeChannelRole,
   normalizeSocialLinksInput,
   isSiteAdminUser,
 } from './channels.js'
+import {
+  listTiersForChannel,
+  saveChannelTiers,
+  getActiveSubscriptionTierSort,
+  tierIdBelongsToChannel,
+  memberCanViewPostMinTier,
+  minTierSortExistsForChannel,
+} from './subscription-tiers.js'
 import {
   isLivekitConfigured,
   liveRoomName,
@@ -51,6 +60,12 @@ import {
   parseCorsOrigins,
 } from './security.js'
 import { registerOAuthRoutes } from './oauth.js'
+import {
+  REACTION_KINDS,
+  normalizeReactionKind,
+  normalizeChannelReactions,
+  REACTION_CATALOG,
+} from './reactions.js'
 
 syncAdminRolesFromEnv()
 assertJwtSecret()
@@ -132,6 +147,22 @@ function uploadBannerRequired(req, res, next) {
     }
     if (!req.file) {
       res.status(400).json({ error: 'Выберите изображение шапки' })
+      return
+    }
+    next()
+  })
+}
+
+/** Только для multipart/form-data: одно фото в ЛС (поле photo). */
+function dmPhotoUpload(req, res, next) {
+  const ct = String(req.headers['content-type'] || '')
+  if (!ct.includes('multipart/form-data')) {
+    next()
+    return
+  }
+  upload.single('photo')(req, res, (err) => {
+    if (err) {
+      res.status(400).json({ error: err.message || 'Ошибка загрузки файла' })
       return
     }
     next()
@@ -231,7 +262,8 @@ function fetchAuthUser(id) {
     .prepare(
       `SELECT id, email, display_name AS displayName, created_at AS createdAt,
               role, banned, ban_reason AS banReason, banned_until AS bannedUntil,
-              avatar_path AS avatarPath
+              avatar_path AS avatarPath,
+              COALESCE(show_public_channels, 0) AS showPublicChannels
        FROM users WHERE id = ?`
     )
     .get(id)
@@ -250,7 +282,46 @@ function mapUserPublic(row) {
     banned: b.active,
     banReason: b.active ? b.reason || null : null,
     banUntil: b.active ? b.until || null : null,
+    showPublicChannels: Number(row.showPublicChannels) === 1,
   }
+}
+
+/** Публичная карточка пользователя для запросившего: без email для чужих (кроме админа и владельца карточки). */
+function mapUserProfileForViewer(viewerRow, targetRow) {
+  if (!viewerRow || !targetRow) return null
+  const viewerIsAdmin = normalizeRole(viewerRow.role) === 'admin'
+  const isSelf = Number(viewerRow.id) === Number(targetRow.id)
+  const row = promoteAdminFromEnv(targetRow)
+  if (!row) return null
+  const pub = mapUserPublic(row)
+  if (viewerIsAdmin || isSelf) return pub
+  return {
+    id: pub.id,
+    displayName: pub.displayName,
+    avatarUrl: pub.avatarUrl,
+    role: pub.role,
+    createdAt: pub.createdAt,
+    banned: pub.banned,
+  }
+}
+
+/** Каналы участника для публичного профиля (без paywall-деталей). */
+function listPublicChannelsForUser(userId) {
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.slug, c.name, c.banner_path AS bannerPath
+       FROM channels c
+       INNER JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?
+       WHERE COALESCE(c.blocked, 0) = 0
+       ORDER BY c.name COLLATE NOCASE ASC`
+    )
+    .all(userId)
+  return rows.map((r) => ({
+    id: r.id,
+    slug: r.slug,
+    name: r.name,
+    bannerPath: r.bannerPath || null,
+  }))
 }
 
 function mapDirectMessageRow(row, viewerId) {
@@ -258,6 +329,7 @@ function mapDirectMessageRow(row, viewerId) {
   return {
     id: row.id,
     content: row.content,
+    imageUrl: row.imagePath || null,
     createdAt: row.createdAt,
     fromUserId: row.senderId,
     toUserId: row.recipientId,
@@ -477,6 +549,7 @@ function mapPostRow(row) {
   if (!row) return null
   const cc = row.commentCount
   const commentCount = typeof cc === 'number' && Number.isFinite(cc) ? cc : Number(cc) || 0
+  const mts = row.minTierSort
   return {
     id: row.id,
     content: row.content,
@@ -487,6 +560,7 @@ function mapPostRow(row) {
     authorAvatar: row.authorAvatar || null,
     imagePath: row.imagePath || null,
     commentCount,
+    minTierSort: mts != null && mts !== '' ? Number(mts) : null,
   }
 }
 
@@ -535,6 +609,7 @@ function deletePostAndAssets(postId) {
 }
 
 const SQL_POST_SELECT_CORE = `SELECT p.id, p.content, p.created_at AS createdAt, p.pinned_at AS pinnedAt, p.image_path AS imagePath,
+              p.min_tier_sort AS minTierSort,
               u.display_name AS authorName, u.id AS authorId, u.avatar_path AS authorAvatar,
               (SELECT COUNT(*) FROM post_comments pc WHERE pc.post_id = p.id) AS commentCount
        FROM posts p JOIN users u ON u.id = p.user_id`
@@ -576,13 +651,6 @@ FROM post_comments c
 JOIN users u ON u.id = c.user_id
 LEFT JOIN post_comments pr ON pr.id = c.reply_to_id
 LEFT JOIN users pu ON pu.id = pr.user_id`.trim()
-
-const REACTION_KINDS = new Set(['like', 'fire', 'clap', 'heart', '100'])
-
-function normalizeReactionKind(raw) {
-  const k = String(raw || 'like').toLowerCase()
-  return REACTION_KINDS.has(k) ? k : null
-}
 
 function attachPostReactions(userId, posts) {
   if (!posts.length) return posts
@@ -823,6 +891,24 @@ app.get('/api/users/search', requireAuth, requireNotBanned, (req, res) => {
   })
 })
 
+app.get('/api/users/:id', requireAuth, requireNotBanned, (req, res) => {
+  const targetId = Number(req.params.id)
+  if (!Number.isFinite(targetId) || targetId <= 0) {
+    res.status(400).json({ error: 'Некорректный пользователь' })
+    return
+  }
+  const viewer = promoteAdminFromEnv(fetchAuthUser(req.userId))
+  const target = fetchAuthUser(targetId)
+  if (!target) {
+    res.status(404).json({ error: 'Пользователь не найден' })
+    return
+  }
+  const user = mapUserProfileForViewer(viewer, target)
+  const showCh = Number(target.showPublicChannels) === 1
+  user.publicChannels = showCh ? listPublicChannelsForUser(targetId) : []
+  res.json({ user })
+})
+
 app.get('/api/dm/conversations', requireAuth, requireNotBanned, (req, res) => {
   const uid = req.userId
   const peerRows = db
@@ -843,7 +929,7 @@ app.get('/api/dm/conversations', requireAuth, requireNotBanned, (req, res) => {
     if (!peer) continue
     const last = db
       .prepare(
-        `SELECT id, content, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
+        `SELECT id, content, image_path AS imagePath, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
          FROM direct_messages
          WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
          ORDER BY id DESC LIMIT 1`
@@ -878,7 +964,7 @@ app.get('/api/dm/with/:otherUserId', requireAuth, requireNotBanned, (req, res) =
   if (beforeId) {
     rows = db
       .prepare(
-        `SELECT id, content, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
+        `SELECT id, content, image_path AS imagePath, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
          FROM direct_messages
          WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))
            AND id < ?
@@ -888,7 +974,7 @@ app.get('/api/dm/with/:otherUserId', requireAuth, requireNotBanned, (req, res) =
   } else {
     rows = db
       .prepare(
-        `SELECT id, content, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
+        `SELECT id, content, image_path AS imagePath, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
          FROM direct_messages
          WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
          ORDER BY id DESC LIMIT ?`
@@ -904,48 +990,57 @@ app.get('/api/dm/with/:otherUserId', requireAuth, requireNotBanned, (req, res) =
   })
 })
 
-app.post('/api/dm/with/:otherUserId', requireAuth, requireNotBanned, (req, res) => {
-  const otherId = Number(req.params.otherUserId)
-  if (!Number.isFinite(otherId) || otherId <= 0 || otherId === req.userId) {
-    res.status(400).json({ error: 'Некорректный собеседник' })
-    return
+app.post(
+  '/api/dm/with/:otherUserId',
+  requireAuth,
+  requireNotBanned,
+  dmPhotoUpload,
+  (req, res) => {
+    const otherId = Number(req.params.otherUserId)
+    if (!Number.isFinite(otherId) || otherId <= 0 || otherId === req.userId) {
+      res.status(400).json({ error: 'Некорректный собеседник' })
+      return
+    }
+    const other = fetchAuthUser(otherId)
+    if (!other || banInfo(other).active) {
+      if (req.file?.filename) safeUnlinkUpload(`/uploads/${req.file.filename}`)
+      res.status(404).json({ error: 'Пользователь недоступен' })
+      return
+    }
+    const imageRel = req.file?.filename ? `/uploads/${req.file.filename}` : null
+    const text = String(req.body?.content ?? '').trim()
+    if (!text && !imageRel) {
+      res.status(400).json({ error: 'Введите текст или прикрепите фото' })
+      return
+    }
+    if (text.length > MAX_DM_LEN) {
+      if (imageRel) safeUnlinkUpload(imageRel)
+      res.status(400).json({ error: `Максимум ${MAX_DM_LEN} символов` })
+      return
+    }
+    const info = db
+      .prepare(
+        `INSERT INTO direct_messages (sender_id, recipient_id, content, image_path) VALUES (?, ?, ?, ?)`
+      )
+      .run(req.userId, otherId, text, imageRel)
+    const row = db
+      .prepare(
+        `SELECT id, content, image_path AS imagePath, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
+         FROM direct_messages WHERE id = ?`
+      )
+      .get(info.lastInsertRowid)
+    const msg = mapDirectMessageRow(row, req.userId)
+    const msgForPeer = mapDirectMessageRow(row, otherId)
+    const fromPublic = mapUserPublic(promoteAdminFromEnv(fetchAuthUser(req.userId)))
+    io.to(`u:${otherId}`).emit('dm:message', {
+      message: msgForPeer,
+      fromUser: fromPublic
+        ? { id: fromPublic.id, displayName: fromPublic.displayName, avatarUrl: fromPublic.avatarUrl }
+        : null,
+    })
+    res.status(201).json({ message: msg })
   }
-  const other = fetchAuthUser(otherId)
-  if (!other || banInfo(other).active) {
-    res.status(404).json({ error: 'Пользователь недоступен' })
-    return
-  }
-  const text = String(req.body?.content ?? '').trim()
-  if (!text) {
-    res.status(400).json({ error: 'Введите текст сообщения' })
-    return
-  }
-  if (text.length > MAX_DM_LEN) {
-    res.status(400).json({ error: `Максимум ${MAX_DM_LEN} символов` })
-    return
-  }
-  const info = db
-    .prepare(
-      `INSERT INTO direct_messages (sender_id, recipient_id, content) VALUES (?, ?, ?)`
-    )
-    .run(req.userId, otherId, text)
-  const row = db
-    .prepare(
-      `SELECT id, content, created_at AS createdAt, sender_id AS senderId, recipient_id AS recipientId
-       FROM direct_messages WHERE id = ?`
-    )
-    .get(info.lastInsertRowid)
-  const msg = mapDirectMessageRow(row, req.userId)
-  const msgForPeer = mapDirectMessageRow(row, otherId)
-  const fromPublic = mapUserPublic(promoteAdminFromEnv(fetchAuthUser(req.userId)))
-  io.to(`u:${otherId}`).emit('dm:message', {
-    message: msgForPeer,
-    fromUser: fromPublic
-      ? { id: fromPublic.id, displayName: fromPublic.displayName, avatarUrl: fromPublic.avatarUrl }
-      : null,
-  })
-  res.status(201).json({ message: msg })
-})
+)
 
 app.get('/api/me', requireAuth, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate')
@@ -956,12 +1051,26 @@ app.get('/api/me', requireAuth, (req, res) => {
 })
 
 app.patch('/api/me', requireAuth, (req, res) => {
-  const name = String(req.body?.displayName || '').trim()
-  if (!name || name.length > 80) {
-    res.status(400).json({ error: 'Имя от 1 до 80 символов' })
+  const body = req.body || {}
+  let updated = false
+  if (body.displayName !== undefined && body.displayName !== null) {
+    const name = String(body.displayName || '').trim()
+    if (!name || name.length > 80) {
+      res.status(400).json({ error: 'Имя от 1 до 80 символов' })
+      return
+    }
+    db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name, req.userId)
+    updated = true
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'showPublicChannels')) {
+    const v = body.showPublicChannels === true || body.showPublicChannels === 1 || body.showPublicChannels === '1'
+    db.prepare('UPDATE users SET show_public_channels = ? WHERE id = ?').run(v ? 1 : 0, req.userId)
+    updated = true
+  }
+  if (!updated) {
+    res.status(400).json({ error: 'Укажите имя или настройку отображения каналов' })
     return
   }
-  db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(name, req.userId)
   const urow = promoteAdminFromEnv(fetchAuthUser(req.userId))
   res.json({ user: mapUserPublic(urow) })
 })
@@ -1053,14 +1162,20 @@ app.post('/api/channels', requireAuth, requireNotBanned, (req, res) => {
     res.status(400).json({ error: 'Адрес канала (slug): латиница, цифры и дефис, 2–50 символов' })
     return
   }
+  const rawSocial = req.body?.socialLinks
+  const socialOnCreate = normalizeSocialLinksInput(Array.isArray(rawSocial) ? rawSocial : [])
+  const socialLinksJson = socialOnCreate.length ? JSON.stringify(socialOnCreate) : null
   try {
     const info = db
       .prepare(
-        `INSERT INTO channels (slug, name, description, owner_id, price_month, price_year) VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO channels (slug, name, description, owner_id, price_month, price_year, social_links) VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(slug, name, description, req.userId, priceMonth, priceYear)
+      .run(slug, name, description, req.userId, priceMonth, priceYear, socialLinksJson)
     const cid = info.lastInsertRowid
     db.prepare(`INSERT INTO channel_members (channel_id, user_id, role) VALUES (?, ?, 'owner')`).run(cid, req.userId)
+    db.prepare(
+      `INSERT INTO channel_subscription_tiers (channel_id, sort_order, name, price_month, price_year) VALUES (?, 1, 'Участник', ?, ?)`
+    ).run(cid, priceMonth, priceYear)
     res.status(201).json({ channel: fetchChannel(cid) })
   } catch (e) {
     if (String(e).includes('UNIQUE')) {
@@ -1092,7 +1207,7 @@ app.post('/api/channels/join', requireAuth, requireNotBanned, (req, res) => {
 app.get('/api/channels/:channelKey/summary', requireAuth, loadChannelParam, (req, res) => {
   const m = getMembership(req.userId, req.channelId)
   res.json({
-    channel: req.channel,
+    channel: { ...req.channel, subscriptionTiers: listTiersForChannel(req.channelId) },
     myRole: m ? normalizeChannelRole(m.role) : null,
     subscription: channelSubPayload(req.channelId, req.userId),
     hasAccess: hasChannelAccess(req.userId, req.channelId),
@@ -1120,6 +1235,15 @@ app.post('/api/channels/:channelKey/subscription/activate', requireAuth, require
     return
   }
   const plan = req.body?.plan === 'year' ? 'year' : 'month'
+  const tierId = Number(req.body?.tierId)
+  if (!Number.isFinite(tierId) || tierId <= 0) {
+    res.status(400).json({ error: 'Выберите уровень подписки' })
+    return
+  }
+  if (!tierIdBelongsToChannel(tierId, req.channelId)) {
+    res.status(400).json({ error: 'Некорректный уровень подписки' })
+    return
+  }
   const now = new Date()
   const existing = db
     .prepare(`SELECT * FROM channel_subscriptions WHERE channel_id = ? AND user_id = ?`)
@@ -1128,17 +1252,17 @@ app.post('/api/channels/:channelKey/subscription/activate', requireAuth, require
   if (!existing) {
     newEnd = addPeriodMs(plan, now)
     db.prepare(
-      `INSERT INTO channel_subscriptions (channel_id, user_id, plan, status, current_period_end, canceled_at, updated_at)
-       VALUES (?, ?, ?, 'active', ?, NULL, datetime('now'))`
-    ).run(req.channelId, req.userId, plan, newEnd)
+      `INSERT INTO channel_subscriptions (channel_id, user_id, plan, status, current_period_end, canceled_at, updated_at, tier_id)
+       VALUES (?, ?, ?, 'active', ?, NULL, datetime('now'), ?)`
+    ).run(req.channelId, req.userId, plan, newEnd, tierId)
   } else {
     const prevEnd = new Date(existing.current_period_end)
     const base = prevEnd > now ? prevEnd : now
     newEnd = addPeriodMs(plan, base)
     db.prepare(
-      `UPDATE channel_subscriptions SET plan = ?, status = 'active', current_period_end = ?, canceled_at = NULL, updated_at = datetime('now')
+      `UPDATE channel_subscriptions SET plan = ?, tier_id = ?, status = 'active', current_period_end = ?, canceled_at = NULL, updated_at = datetime('now')
        WHERE channel_id = ? AND user_id = ?`
-    ).run(plan, newEnd, req.channelId, req.userId)
+    ).run(plan, tierId, newEnd, req.channelId, req.userId)
   }
   db.prepare(`INSERT OR IGNORE INTO channel_members (channel_id, user_id, role) VALUES (?, ?, 'member')`).run(
     req.channelId,
@@ -1216,6 +1340,74 @@ app.patch(
   }
 )
 
+app.patch(
+  '/api/channels/:channelKey/subscription-tiers',
+  requireAuth,
+  requireNotBanned,
+  loadChannelParam,
+  requireChannelOwner,
+  (req, res) => {
+    const raw = req.body?.tiers
+    if (!Array.isArray(raw)) {
+      res.status(400).json({ error: 'Передайте массив tiers' })
+      return
+    }
+    try {
+      const tiers = saveChannelTiers(req.channelId, raw)
+      res.json({ tiers, channel: fetchChannel(req.channelId) })
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Не удалось сохранить уровни' })
+    }
+  }
+)
+
+app.patch(
+  '/api/channels/:channelKey/reactions',
+  requireAuth,
+  requireNotBanned,
+  loadChannelParam,
+  requireChannelRoleManager,
+  (req, res) => {
+    const enabledRaw = req.body?.reactionEnabled
+    const quickRaw = req.body?.reactionQuick
+    if (!Array.isArray(enabledRaw) || !Array.isArray(quickRaw)) {
+      res.status(400).json({ error: 'Передайте массивы reactionEnabled и reactionQuick' })
+      return
+    }
+    const enabled = [
+      ...new Set(
+        enabledRaw
+          .map((x) => String(x || '').toLowerCase().trim())
+          .filter((k) => REACTION_KINDS.has(k))
+      ),
+    ]
+    if (!enabled.length) {
+      res.status(400).json({ error: 'Выберите хотя бы одну реакцию для канала' })
+      return
+    }
+    let quick = [
+      ...new Set(
+        quickRaw
+          .map((x) => String(x || '').toLowerCase().trim())
+          .filter((k) => enabled.includes(k))
+      ),
+    ]
+    if (quick.length > 5) quick = quick.slice(0, 5)
+    if (!quick.length) quick = enabled.slice(0, Math.min(5, enabled.length))
+
+    db.prepare(`UPDATE channels SET reaction_enabled_json = ?, reaction_quick_json = ? WHERE id = ?`).run(
+      JSON.stringify(enabled),
+      JSON.stringify(quick),
+      req.channelId
+    )
+    res.json({ channel: fetchChannel(req.channelId) })
+  }
+)
+
+app.get('/api/reactions/catalog', (_req, res) => {
+  res.json({ catalog: REACTION_CATALOG })
+})
+
 app.get(
   '/api/channels/:channelKey/members',
   requireAuth,
@@ -1272,6 +1464,9 @@ app.get(
     const ch = req.channel
     const priceMonth = Number(ch.priceMonth) || 0
     const priceYear = Number(ch.priceYear) || 0
+    const tierPriceById = new Map(
+      listTiersForChannel(cid).map((t) => [t.id, { priceMonth: t.priceMonth, priceYear: t.priceYear }])
+    )
 
     const roleRows = db
       .prepare(
@@ -1393,15 +1588,29 @@ app.get(
       .prepare(
         `SELECT u.id AS userId, u.display_name AS displayName, u.email,
                 cs.plan, cs.status, cs.current_period_end AS currentPeriodEnd,
-                cs.updated_at AS updatedAt, cs.canceled_at AS canceledAt
+                cs.updated_at AS updatedAt, cs.canceled_at AS canceledAt,
+                t.name AS tierName
          FROM channel_subscriptions cs
          JOIN users u ON u.id = cs.user_id
+         LEFT JOIN channel_subscription_tiers t ON t.id = cs.tier_id
          WHERE cs.channel_id = ?
          ORDER BY datetime(cs.updated_at) DESC LIMIT 25`
       )
       .all(cid)
 
-    const estimatedMonthlyRub = activeMonthPlan * priceMonth + activeYearPlan * Math.round(priceYear / 12)
+    const revenueRows = db
+      .prepare(
+        `SELECT cs.plan AS plan, cs.tier_id AS tierId
+         FROM channel_subscriptions cs
+         WHERE cs.channel_id = ? AND cs.status = 'active' AND datetime(cs.current_period_end) > datetime('now')`
+      )
+      .all(cid)
+    let estimatedMonthlyRub = 0
+    for (const rr of revenueRows) {
+      const tp = tierPriceById.get(rr.tierId) || { priceMonth, priceYear }
+      if (rr.plan === 'year') estimatedMonthlyRub += Math.round(Number(tp.priceYear) / 12) || 0
+      else estimatedMonthlyRub += Number(tp.priceMonth) || 0
+    }
 
     res.json({
       channel: {
@@ -1442,6 +1651,7 @@ app.get(
         currentPeriodEnd: r.currentPeriodEnd,
         updatedAt: r.updatedAt,
         canceledAt: r.canceledAt,
+        tierName: r.tierName || null,
       })),
     })
   }
@@ -1510,16 +1720,24 @@ app.get(
   requireChannelAccess,
   (req, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
+    const staff = isChannelStaff(req.userId, req.channelId) ? 1 : 0
+    const viewerTier =
+      staff === 1 ? 9999 : (getActiveSubscriptionTierSort(req.userId, req.channelId) ?? 0)
     const rows = db
       .prepare(
         `${SQL_POST_SELECT_CORE}
          WHERE p.channel_id = ?
+           AND (
+             ? = 1
+             OR p.min_tier_sort IS NULL
+             OR ? >= p.min_tier_sort
+           )
          ORDER BY (CASE WHEN p.pinned_at IS NOT NULL THEN 0 ELSE 1 END),
                   p.pinned_at DESC,
                   p.created_at DESC
          LIMIT ?`
       )
-      .all(req.channelId, limit)
+      .all(req.channelId, staff, viewerTier, limit)
     const list = enrichPostsWithImages(rows.map(mapPostRow))
     res.json({ posts: attachPostReactions(req.userId, list), channelId: req.channelId })
   }
@@ -1544,10 +1762,26 @@ app.post(
       res.status(400).json({ error: `Максимум ${MAX_POST_LEN} символов` })
       return
     }
-    const insertPostWithImages = db.transaction((userId, text, channelId, uploaded) => {
+    let minTierSort = null
+    const rawMin = req.body?.minTierSort
+    if (rawMin != null && String(rawMin).trim() !== '') {
+      const v = Number(rawMin)
+      if (!Number.isFinite(v) || v < 1) {
+        res.status(400).json({ error: 'Некорректный минимальный уровень для поста' })
+        return
+      }
+      if (!minTierSortExistsForChannel(req.channelId, v)) {
+        res.status(400).json({ error: 'Укажите уровень из списка в управлении канала' })
+        return
+      }
+      minTierSort = v
+    }
+    const insertPostWithImages = db.transaction((userId, text, channelId, uploaded, minSort) => {
       const info = db
-        .prepare('INSERT INTO posts (user_id, content, image_path, channel_id) VALUES (?, ?, ?, ?)')
-        .run(userId, text || '', uploaded[0] ? `/uploads/${uploaded[0].filename}` : null, channelId)
+        .prepare(
+          'INSERT INTO posts (user_id, content, image_path, channel_id, min_tier_sort) VALUES (?, ?, ?, ?, ?)'
+        )
+        .run(userId, text || '', uploaded[0] ? `/uploads/${uploaded[0].filename}` : null, channelId, minSort)
       const postId = info.lastInsertRowid
       const insImg = db.prepare(
         'INSERT INTO post_images (post_id, path, sort_order) VALUES (?, ?, ?)'
@@ -1557,7 +1791,7 @@ app.post(
       }
       return postId
     })
-    const postId = insertPostWithImages(req.userId, content, req.channelId, files)
+    const postId = insertPostWithImages(req.userId, content, req.channelId, files, minTierSort)
     const row = fetchPostRowById(postId)
     const [enriched] = enrichPostsWithImages([mapPostRow(row)])
     const post = { ...enriched, reactionCounts: {}, myReaction: null }
@@ -1640,14 +1874,32 @@ app.post(
       res.status(400).json({ error: 'Некорректный пост' })
       return
     }
-    const post = db.prepare('SELECT id FROM posts WHERE id = ? AND channel_id = ?').get(postId, req.channelId)
+    const post = db
+      .prepare('SELECT id, min_tier_sort AS minTierSort FROM posts WHERE id = ? AND channel_id = ?')
+      .get(postId, req.channelId)
     if (!post) {
       res.status(404).json({ error: 'Пост не найден' })
+      return
+    }
+    if (
+      !memberCanViewPostMinTier(
+        req.userId,
+        req.channelId,
+        post.minTierSort,
+        isChannelStaff(req.userId, req.channelId)
+      )
+    ) {
+      res.status(403).json({ error: 'Нет доступа к этому посту' })
       return
     }
     const kind = normalizeReactionKind(req.body?.kind)
     if (!kind) {
       res.status(400).json({ error: 'Некорректная реакция' })
+      return
+    }
+    const en = req.channel?.reactionEnabled
+    if (Array.isArray(en) && en.length && !en.includes(kind)) {
+      res.status(400).json({ error: 'Эта реакция отключена в канале' })
       return
     }
     const existing = db
@@ -1671,6 +1923,9 @@ app.post(
   }
 )
 
+const DEFAULT_COMMENTS_PAGE = 40
+const MAX_COMMENTS_PAGE = 100
+
 app.get(
   '/api/channels/:channelKey/posts/:postId/comments',
   requireAuth,
@@ -1683,19 +1938,146 @@ app.get(
       res.status(400).json({ error: 'Некорректный пост' })
       return
     }
-    const post = db.prepare('SELECT id FROM posts WHERE id = ? AND channel_id = ?').get(postId, req.channelId)
+    const post = db
+      .prepare('SELECT id, min_tier_sort AS minTierSort FROM posts WHERE id = ? AND channel_id = ?')
+      .get(postId, req.channelId)
     if (!post) {
       res.status(404).json({ error: 'Пост не найден' })
       return
     }
-    const rows = db
-      .prepare(
-        `${COMMENT_ROW_SQL}
-         WHERE c.post_id = ?
-         ORDER BY c.created_at ASC, c.id ASC`
+    if (
+      !memberCanViewPostMinTier(
+        req.userId,
+        req.channelId,
+        post.minTierSort,
+        isChannelStaff(req.userId, req.channelId)
       )
-      .all(postId)
-    res.json({ comments: rows.map(mapCommentRow) })
+    ) {
+      res.status(403).json({ error: 'Нет доступа к комментариям этого поста' })
+      return
+    }
+    const limit = Math.min(
+      MAX_COMMENTS_PAGE,
+      Math.max(1, Number(req.query.limit) || DEFAULT_COMMENTS_PAGE)
+    )
+    const rawBefore = req.query.beforeId
+    const beforeId =
+      rawBefore != null && rawBefore !== '' ? Number(rawBefore) : null
+    const useBefore =
+      beforeId != null && Number.isFinite(beforeId) && beforeId > 0
+
+    let rows
+    if (useBefore) {
+      rows = db
+        .prepare(
+          `${COMMENT_ROW_SQL}
+           WHERE c.post_id = ? AND c.id < ?
+           ORDER BY c.id DESC
+           LIMIT ?`
+        )
+        .all(postId, beforeId, limit)
+    } else {
+      rows = db
+        .prepare(
+          `${COMMENT_ROW_SQL}
+           WHERE c.post_id = ?
+           ORDER BY c.id DESC
+           LIMIT ?`
+        )
+        .all(postId, limit)
+    }
+    rows.reverse()
+
+    const hasMoreOlder =
+      rows.length > 0 &&
+      db
+        .prepare(
+          `SELECT 1 AS x FROM post_comments WHERE post_id = ? AND id < ? LIMIT 1`
+        )
+        .get(postId, rows[0].id) != null
+
+    let total = null
+    if (!useBefore) {
+      total =
+        db.prepare(`SELECT COUNT(*) AS c FROM post_comments WHERE post_id = ?`).get(postId)?.c ?? 0
+      total = Number(total) || 0
+    }
+
+    res.json({
+      comments: rows.map(mapCommentRow),
+      hasMoreOlder,
+      ...(total != null ? { total } : {}),
+    })
+  }
+)
+
+app.delete(
+  '/api/channels/:channelKey/posts/:postId/comments/:commentId',
+  requireAuth,
+  requireNotBanned,
+  loadChannelParam,
+  requireChannelAccess,
+  (req, res) => {
+    if (!canModerateChannelContent(req.userId, req.channelId)) {
+      res.status(403).json({ error: 'Недостаточно прав для модерации комментариев' })
+      return
+    }
+    const postId = Number(req.params.postId)
+    const commentId = Number(req.params.commentId)
+    if (!Number.isFinite(postId) || !Number.isFinite(commentId)) {
+      res.status(400).json({ error: 'Некорректные параметры' })
+      return
+    }
+    const row = db
+      .prepare(
+        `SELECT c.id FROM post_comments c
+         JOIN posts p ON p.id = c.post_id
+         WHERE c.id = ? AND c.post_id = ? AND p.channel_id = ?`
+      )
+      .get(commentId, postId, req.channelId)
+    if (!row) {
+      res.status(404).json({ error: 'Комментарий не найден' })
+      return
+    }
+    db.prepare(`DELETE FROM post_comments WHERE id = ?`).run(commentId)
+    io.to(`ch:${req.channelId}`).emit('post:comment:remove', {
+      channelId: req.channelId,
+      postId,
+      commentId,
+    })
+    res.json({ ok: true, postId, commentId })
+  }
+)
+
+app.delete(
+  '/api/channels/:channelKey/chat/messages/:messageId',
+  requireAuth,
+  requireNotBanned,
+  loadChannelParam,
+  requireChannelAccess,
+  (req, res) => {
+    if (!canModerateChannelContent(req.userId, req.channelId)) {
+      res.status(403).json({ error: 'Недостаточно прав для модерации чата' })
+      return
+    }
+    const messageId = Number(req.params.messageId)
+    if (!Number.isFinite(messageId)) {
+      res.status(400).json({ error: 'Некорректное сообщение' })
+      return
+    }
+    const meta = db
+      .prepare(`SELECT id FROM chat_messages WHERE id = ? AND channel_id = ?`)
+      .get(messageId, req.channelId)
+    if (!meta) {
+      res.status(404).json({ error: 'Сообщение не найдено' })
+      return
+    }
+    db.prepare(`DELETE FROM chat_messages WHERE id = ?`).run(messageId)
+    io.to(`ch:${req.channelId}`).emit('chat:message:remove', {
+      channelId: req.channelId,
+      messageId,
+    })
+    res.json({ ok: true, messageId })
   }
 )
 
@@ -1725,7 +2107,7 @@ app.get(
   }
 )
 
-app.get('/api/admin/users', requireAuth, requireStaff, (req, res) => {
+app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   const q = String(req.query.q || '').trim()
   const esc = q.replace(/[%_\\]/g, '')
   let where = ''
@@ -2102,9 +2484,22 @@ app.post(
       res.status(400).json({ error: 'Некорректный пост' })
       return
     }
-    const post = db.prepare('SELECT id FROM posts WHERE id = ? AND channel_id = ?').get(postId, req.channelId)
+    const post = db
+      .prepare('SELECT id, min_tier_sort AS minTierSort FROM posts WHERE id = ? AND channel_id = ?')
+      .get(postId, req.channelId)
     if (!post) {
       res.status(404).json({ error: 'Пост не найден' })
+      return
+    }
+    if (
+      !memberCanViewPostMinTier(
+        req.userId,
+        req.channelId,
+        post.minTierSort,
+        isChannelStaff(req.userId, req.channelId)
+      )
+    ) {
+      res.status(403).json({ error: 'Нельзя комментировать этот пост' })
       return
     }
     const text = String(req.body?.content ?? '').trim()

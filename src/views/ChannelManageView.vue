@@ -1,9 +1,10 @@
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { api, apiForm, parseJson } from '../lib/api'
 import { mediaUrl } from '../lib/mediaUrl'
+import { REACTION_CATALOG } from '../lib/reactionsCatalog'
 
 const route = useRoute()
 const { refreshMe, currentChannel, isAdmin: isSiteAdmin } = useAuth()
@@ -18,6 +19,17 @@ const descDraft = ref('')
 const socialRows = ref([{ label: '', url: '' }])
 const settingsMsg = ref('')
 const settingsErr = ref('')
+const reactionsMsg = ref('')
+const reactionsErr = ref('')
+const reactionEnabled = ref([])
+const reactionQuick = ref([])
+const reactionsDialogOpen = ref(false)
+const draftEnabled = ref([])
+const draftQuick = ref([])
+const reactionsDialogErr = ref('')
+const subscriptionTiersDraft = ref([])
+const tiersMsg = ref('')
+const tiersErr = ref('')
 
 const isOwner = computed(() => currentChannel.value?.myRole === 'owner' || isSiteAdmin.value)
 const canManageRoles = computed(() => {
@@ -41,12 +53,97 @@ async function load() {
   members.value = data.members || []
 }
 
-watch(channelKey, load, { immediate: true })
+async function loadSubscriptionTiers() {
+  const k = channelKey.value
+  if (!k || !isOwner.value) {
+    subscriptionTiersDraft.value = []
+    return
+  }
+  const res = await api(`/api/channels/${encodeURIComponent(k)}/summary`)
+  const data = await parseJson(res)
+  if (res.ok && Array.isArray(data?.channel?.subscriptionTiers) && data.channel.subscriptionTiers.length) {
+    subscriptionTiersDraft.value = data.channel.subscriptionTiers.map((t) => ({
+      id: t.id,
+      sortOrder: t.sortOrder,
+      name: t.name,
+      priceMonth: t.priceMonth,
+      priceYear: t.priceYear,
+    }))
+  } else if (res.ok) {
+    subscriptionTiersDraft.value = [{ sortOrder: 1, name: 'Участник', priceMonth: 0, priceYear: 0 }]
+  }
+}
+
+function addTierRow() {
+  if (subscriptionTiersDraft.value.length >= 8) return
+  const next =
+    Math.max(0, ...subscriptionTiersDraft.value.map((t) => Number(t.sortOrder) || 0)) + 1
+  subscriptionTiersDraft.value = [
+    ...subscriptionTiersDraft.value,
+    { sortOrder: next, name: '', priceMonth: 0, priceYear: 0 },
+  ]
+}
+
+function removeTierRow(i) {
+  if (subscriptionTiersDraft.value.length <= 1) return
+  subscriptionTiersDraft.value = subscriptionTiersDraft.value.filter((_, idx) => idx !== i)
+}
+
+async function saveSubscriptionTiers() {
+  const k = channelKey.value
+  if (!k) return
+  tiersMsg.value = ''
+  tiersErr.value = ''
+  busy.value = true
+  try {
+    const tiers = subscriptionTiersDraft.value.map((t) => ({
+      ...(t.id ? { id: t.id } : {}),
+      sortOrder: Number(t.sortOrder),
+      name: String(t.name || '').trim(),
+      priceMonth: Number(t.priceMonth) || 0,
+      priceYear: Number(t.priceYear) || 0,
+    }))
+    const res = await api(`/api/channels/${encodeURIComponent(k)}/subscription-tiers`, {
+      method: 'PATCH',
+      body: { tiers },
+    })
+    const data = await parseJson(res)
+    if (!res.ok) throw new Error(data?.error || 'Не удалось сохранить')
+    subscriptionTiersDraft.value = (data.tiers || []).map((t) => ({
+      id: t.id,
+      sortOrder: t.sortOrder,
+      name: t.name,
+      priceMonth: t.priceMonth,
+      priceYear: t.priceYear,
+    }))
+    tiersMsg.value = 'Уровни подписки сохранены'
+    await refreshMe()
+  } catch (e) {
+    tiersErr.value = e.message || 'Ошибка'
+  } finally {
+    busy.value = false
+  }
+}
+
+watch(channelKey, async () => {
+  await load()
+  await loadSubscriptionTiers()
+}, { immediate: true })
+
+watch(isOwner, (o) => {
+  if (o) loadSubscriptionTiers()
+})
 
 function channelMatchesRoute(c) {
   if (!c) return false
   const k = channelKey.value
   return c.slug === k || String(c.id) === k
+}
+
+function sortKindsByCatalog(kinds) {
+  const order = REACTION_CATALOG.map((r) => r.kind)
+  const set = new Set(kinds)
+  return order.filter((k) => set.has(k))
 }
 
 watch(
@@ -59,9 +156,119 @@ watch(
     socialRows.value = links.length
       ? links.map((x) => ({ label: x.label || '', url: x.url || '' }))
       : [{ label: '', url: '' }]
+
+    const en = Array.isArray(c.reactionEnabled) ? c.reactionEnabled : []
+    const qu = Array.isArray(c.reactionQuick) ? c.reactionQuick : []
+    reactionEnabled.value =
+      en.length > 0 ? sortKindsByCatalog(en) : REACTION_CATALOG.map((r) => r.kind)
+    reactionQuick.value =
+      qu.length > 0 ? sortKindsByCatalog(qu) : REACTION_CATALOG.slice(0, 5).map((r) => r.kind)
   },
   { immediate: true, deep: true }
 )
+
+function emojiForKind(kind) {
+  return REACTION_CATALOG.find((r) => r.kind === kind)?.emoji ?? '·'
+}
+
+function escapeCloseReactions(e) {
+  if (e.key === 'Escape') closeReactionsDialog()
+}
+
+function openReactionsDialog() {
+  reactionsErr.value = ''
+  reactionsMsg.value = ''
+  reactionsDialogErr.value = ''
+  draftEnabled.value = [...reactionEnabled.value]
+  draftQuick.value = [...reactionQuick.value]
+  reactionsDialogOpen.value = true
+}
+
+function closeReactionsDialog() {
+  reactionsDialogOpen.value = false
+}
+
+watch(reactionsDialogOpen, (open) => {
+  if (open) document.addEventListener('keydown', escapeCloseReactions, true)
+  else document.removeEventListener('keydown', escapeCloseReactions, true)
+})
+
+onUnmounted(() => document.removeEventListener('keydown', escapeCloseReactions, true))
+
+function toggleDraftEnabled(kind) {
+  const en = new Set(draftEnabled.value)
+  if (en.has(kind)) {
+    if (en.size <= 1) return
+    en.delete(kind)
+    draftQuick.value = draftQuick.value.filter((k) => k !== kind)
+  } else {
+    en.add(kind)
+  }
+  draftEnabled.value = sortKindsByCatalog([...en])
+}
+
+function toggleDraftQuick(kind) {
+  if (!draftEnabled.value.includes(kind)) return
+  const q = new Set(draftQuick.value)
+  if (q.has(kind)) {
+    q.delete(kind)
+  } else {
+    if (q.size >= 5) return
+    q.add(kind)
+  }
+  draftQuick.value = sortKindsByCatalog([...q])
+  if (!draftQuick.value.length && draftEnabled.value.length) {
+    draftQuick.value = draftEnabled.value.slice(0, Math.min(5, draftEnabled.value.length))
+  }
+}
+
+async function confirmReactionsDialog() {
+  reactionsDialogErr.value = ''
+  if (!draftEnabled.value.length) {
+    reactionsDialogErr.value = 'Отметьте хотя бы одну реакцию для канала'
+    return
+  }
+  const ok = await saveReactions({
+    enabled: [...draftEnabled.value],
+    quick: [...draftQuick.value],
+  })
+  if (ok) {
+    reactionsDialogOpen.value = false
+  } else if (reactionsErr.value) {
+    reactionsDialogErr.value = reactionsErr.value
+  }
+}
+
+/** @param {{ enabled: string[], quick: string[] } | null} payload если null — берутся текущие reactionEnabled / reactionQuick */
+async function saveReactions(payload = null) {
+  const k = channelKey.value
+  if (!k) return false
+  reactionsMsg.value = ''
+  reactionsErr.value = ''
+  const enabled = sortKindsByCatalog(
+    payload?.enabled ? [...payload.enabled] : [...reactionEnabled.value]
+  )
+  const quick = sortKindsByCatalog(payload?.quick ? [...payload.quick] : [...reactionQuick.value])
+  busy.value = true
+  try {
+    const res = await api(`/api/channels/${encodeURIComponent(k)}/reactions`, {
+      method: 'PATCH',
+      body: { reactionEnabled: enabled, reactionQuick: quick },
+    })
+    const data = await parseJson(res)
+    if (!res.ok) throw new Error(data?.error || 'Не удалось сохранить')
+    reactionEnabled.value = enabled
+    reactionQuick.value = quick
+    reactionsMsg.value = 'Реакции обновлены'
+    await refreshMe()
+    return true
+  } catch (e) {
+    reactionsErr.value = e.message || 'Ошибка'
+    return false
+  } finally {
+    busy.value = false
+  }
+}
 
 function addSocialRow() {
   if (socialRows.value.length >= 12) return
@@ -166,6 +373,10 @@ function roleRu(r) {
       <span v-if="isOwner" class="back back--live back--live-soon" title="Скоро">Прямой эфир · скоро</span>
     </div>
     <h1 class="title">Управление каналом</h1>
+    <p class="lead">
+      Оформление, описание и роли участников. В ленте и общем чате владелец, админ и модератор канала могут удалять
+      комментарии и сообщения, нарушающие правила сообщества.
+    </p>
 
     <section v-if="isOwner" class="card">
       <h2 class="h2">Шапка канала</h2>
@@ -223,6 +434,166 @@ function roleRu(r) {
       <p v-if="settingsMsg" class="ok">{{ settingsMsg }}</p>
       <p v-if="settingsErr" class="bad">{{ settingsErr }}</p>
     </section>
+
+    <section v-if="isOwner" class="card">
+      <h2 class="h2">Уровни подписки</h2>
+      <p class="lead">
+        Название и цены (₽) за месяц и за год. Чем выше «уровень» (число порядка), тем привилегированнее доступ. При
+        публикации можно ограничить пост минимальным уровнем — тогда подписчики с более низким уровнем не увидят его в
+        ленте. Удалить уровень нельзя, пока на него оформлена хотя бы одна подписка.
+      </p>
+      <div class="tiers-table-wrap tg-scroll">
+        <table class="tiers-table">
+          <thead>
+            <tr>
+              <th>Порядок</th>
+              <th>Название</th>
+              <th>₽ / мес</th>
+              <th>₽ / год</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in subscriptionTiersDraft" :key="i">
+              <td>
+                <input v-model.number="row.sortOrder" type="number" min="1" max="99" class="inp inp--num" />
+              </td>
+              <td><input v-model="row.name" type="text" class="inp" maxlength="64" placeholder="Базовый" /></td>
+              <td><input v-model.number="row.priceMonth" type="number" min="0" class="inp inp--num" /></td>
+              <td><input v-model.number="row.priceYear" type="number" min="0" class="inp inp--num" /></td>
+              <td>
+                <button
+                  type="button"
+                  class="rm"
+                  :disabled="busy || subscriptionTiersDraft.length <= 1"
+                  title="Удалить строку"
+                  @click="removeTierRow(i)"
+                >
+                  ×
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <button type="button" class="btn-add" :disabled="busy || subscriptionTiersDraft.length >= 8" @click="addTierRow">
+        + Уровень
+      </button>
+      <button type="button" class="btn-save" :disabled="busy" @click="saveSubscriptionTiers">
+        Сохранить уровни
+      </button>
+      <p v-if="tiersMsg" class="ok">{{ tiersMsg }}</p>
+      <p v-if="tiersErr" class="bad">{{ tiersErr }}</p>
+    </section>
+
+    <section v-if="canManageRoles" class="card">
+      <h2 class="h2">Реакции в ленте</h2>
+      <p class="lead react-lead">
+        Под постами участники ставят эмодзи. До пяти штук можно показать сразу в полоске, остальные выбранные — в
+        меню «ещё».
+      </p>
+      <div class="react-compact">
+        <div class="react-compact__stats">
+          <span>В канале: <strong>{{ reactionEnabled.length }}</strong></span>
+          <span class="react-compact__sep" aria-hidden="true">·</span>
+          <span>В полоске: <strong>{{ reactionQuick.length }}</strong> / 5</span>
+        </div>
+        <div class="react-compact__preview">
+          <span
+            v-for="k in reactionQuick"
+            :key="k"
+            class="react-chip"
+            :title="k"
+          >{{ emojiForKind(k) }}</span>
+          <span
+            v-if="reactionEnabled.length > reactionQuick.length"
+            class="react-chip react-chip--more"
+            title="Ещё в меню «ещё»"
+          >+{{ reactionEnabled.length - reactionQuick.length }}</span>
+        </div>
+        <button type="button" class="react-compact__open" :disabled="busy" @click="openReactionsDialog">
+          Настроить реакции…
+        </button>
+      </div>
+      <p v-if="reactionsMsg" class="ok">{{ reactionsMsg }}</p>
+      <p v-if="reactionsErr" class="bad">{{ reactionsErr }}</p>
+    </section>
+
+    <Teleport to="body">
+      <div
+        v-if="reactionsDialogOpen"
+        class="react-overlay"
+        @click.self="closeReactionsDialog"
+      >
+        <div
+          class="react-modal"
+          role="dialog"
+          aria-labelledby="react-dialog-title"
+          aria-modal="true"
+          @click.stop
+        >
+          <h3 id="react-dialog-title" class="react-modal__title">Настройка реакций</h3>
+          <p class="react-modal__lead">
+            Сначала отметьте, какие реакции доступны в канале (клик по эмодзи). Затем отметьте до пяти для полоски под
+            постом — только из уже доступных.
+          </p>
+
+          <section class="react-modal__block">
+            <h4 class="react-modal__h4">Доступны в канале <span class="react-modal__count">({{ draftEnabled.length }})</span></h4>
+            <div class="react-pick-grid">
+              <button
+                v-for="item in REACTION_CATALOG"
+                :key="'en-' + item.kind"
+                type="button"
+                class="react-pick"
+                :class="{ 'react-pick--on': draftEnabled.includes(item.kind) }"
+                :title="item.kind"
+                :aria-pressed="draftEnabled.includes(item.kind)"
+                :disabled="busy || (draftEnabled.length <= 1 && draftEnabled.includes(item.kind))"
+                @click="toggleDraftEnabled(item.kind)"
+              >
+                <span class="react-pick__emoji">{{ item.emoji }}</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="react-modal__block">
+            <h4 class="react-modal__h4">
+              В полоске под постом <span class="react-modal__count">({{ draftQuick.length }} / 5)</span>
+            </h4>
+            <p class="react-modal__hint">Клик по эмодзи из числа доступных включит или выключит показ в полоске.</p>
+            <div class="react-pick-grid">
+              <button
+                v-for="item in REACTION_CATALOG"
+                :key="'q-' + item.kind"
+                type="button"
+                class="react-pick"
+                :class="{
+                  'react-pick--strip': draftQuick.includes(item.kind),
+                  'react-pick--off': !draftEnabled.includes(item.kind),
+                }"
+                :title="item.kind"
+                :aria-pressed="draftQuick.includes(item.kind)"
+                :disabled="busy || !draftEnabled.includes(item.kind)"
+                @click="toggleDraftQuick(item.kind)"
+              >
+                <span class="react-pick__emoji">{{ item.emoji }}</span>
+              </button>
+            </div>
+          </section>
+
+          <p v-if="reactionsDialogErr" class="react-modal__err">{{ reactionsDialogErr }}</p>
+          <div class="react-modal__foot">
+            <button type="button" class="react-modal__cancel" :disabled="busy" @click="closeReactionsDialog">
+              Отмена
+            </button>
+            <button type="button" class="react-modal__save" :disabled="busy" @click="confirmReactionsDialog">
+              Сохранить
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <p v-if="!canManageRoles" class="bad">Нужны права владельца или админа канала.</p>
     <template v-else>
@@ -350,6 +721,239 @@ function roleRu(r) {
 
 .roles-lead {
   margin-bottom: 12px;
+}
+
+.react-lead {
+  margin-bottom: 12px;
+}
+
+.react-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: var(--tg-elevated);
+}
+
+.react-compact__stats {
+  font-size: 0.88rem;
+  color: var(--tg-muted);
+}
+
+.react-compact__stats strong {
+  color: var(--tg-text);
+}
+
+.react-compact__sep {
+  margin: 0 8px;
+  opacity: 0.5;
+}
+
+.react-compact__preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 36px;
+}
+
+.react-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  font-size: 1.15rem;
+  background: var(--tg-surface);
+  border: 1px solid var(--tg-border);
+}
+
+.react-chip--more {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--tg-muted);
+  width: auto;
+  padding: 0 10px;
+}
+
+.react-compact__open {
+  align-self: flex-start;
+  padding: 10px 18px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid color-mix(in srgb, var(--tg-accent) 40%, var(--tg-border));
+  background: color-mix(in srgb, var(--tg-accent) 12%, var(--tg-surface));
+  color: var(--tg-gold);
+  font-weight: 650;
+  font-size: 0.88rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.react-compact__open:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--tg-accent) 20%, var(--tg-surface));
+}
+
+.react-compact__open:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.react-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.react-modal {
+  width: min(100%, 440px);
+  max-height: min(90vh, 640px);
+  overflow-y: auto;
+  padding: 22px 20px 20px;
+  border-radius: var(--tg-radius-lg);
+  background: var(--tg-surface);
+  border: 1px solid var(--tg-border);
+  box-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.65);
+}
+
+.react-modal__title {
+  margin: 0 0 10px;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.react-modal__lead {
+  margin: 0 0 18px;
+  font-size: 0.84rem;
+  color: var(--tg-muted);
+  line-height: 1.5;
+}
+
+.react-modal__block {
+  margin-bottom: 20px;
+}
+
+.react-modal__h4 {
+  margin: 0 0 10px;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.react-modal__count {
+  font-weight: 500;
+  color: var(--tg-muted);
+}
+
+.react-modal__hint {
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  color: var(--tg-muted);
+  line-height: 1.4;
+}
+
+.react-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 8px;
+}
+
+.react-pick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 0;
+  border-radius: var(--tg-radius-md);
+  border: 2px solid var(--tg-border);
+  background: var(--tg-elevated);
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.react-pick__emoji {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.react-pick--on {
+  border-color: color-mix(in srgb, var(--tg-accent) 55%, var(--tg-border));
+  background: var(--tg-accent-soft);
+}
+
+.react-pick--strip {
+  border-color: color-mix(in srgb, var(--tg-gold) 55%, var(--tg-border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tg-gold) 25%, transparent);
+}
+
+.react-pick--off {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.react-pick:hover:not(:disabled):not(.react-pick--off) {
+  border-color: color-mix(in srgb, var(--tg-accent) 40%, var(--tg-border));
+}
+
+.react-modal__err {
+  margin: 0 0 12px;
+  font-size: 0.84rem;
+  color: #ffab91;
+}
+
+.react-modal__foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--tg-border);
+}
+
+.react-modal__cancel {
+  padding: 10px 16px;
+  border-radius: var(--tg-radius-md);
+  border: 1px solid var(--tg-border);
+  background: transparent;
+  color: var(--tg-muted);
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.react-modal__cancel:hover:not(:disabled) {
+  color: var(--tg-text);
+}
+
+.react-modal__save {
+  padding: 10px 20px;
+  border-radius: var(--tg-radius-md);
+  border: none;
+  font-weight: 650;
+  font-size: 0.88rem;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--tg-on-accent);
+  background: var(--tg-gradient-primary-strong);
+}
+
+.react-modal__save:disabled,
+.react-modal__cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .cover-preview {
@@ -510,6 +1114,38 @@ th {
 .inp--wide {
   flex: 1;
   min-width: 200px;
+}
+
+.inp--num {
+  width: 5.5rem;
+  min-width: 0;
+}
+
+.tiers-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 10px;
+}
+
+.tiers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.tiers-table th,
+.tiers-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--tg-border);
+  vertical-align: middle;
+}
+
+.tiers-table th {
+  color: var(--tg-muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .rm {

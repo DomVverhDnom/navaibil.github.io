@@ -6,7 +6,7 @@ import { mediaUrl } from '../lib/mediaUrl'
 
 const route = useRoute()
 const router = useRouter()
-const { isAuthenticated, hasAnyChannelAccess, isStaff, user, logout } = useAuth()
+const { isAuthenticated, hasAnyChannelAccess, isAdmin, user, logout } = useAuth()
 
 const links = computed(() => {
   const base = [{ to: '/', label: 'Главная' }]
@@ -16,7 +16,7 @@ const links = computed(() => {
       { to: '/messages', label: 'Сообщения' },
       { to: '/cabinet', label: 'Кабинет' },
     ]
-    if (isStaff.value) extra.push({ to: '/admin', label: 'Админка' })
+    if (isAdmin.value) extra.push({ to: '/admin', label: 'Админка' })
     return [...base, ...extra]
   }
   return [...base, { to: '/login', label: 'Вход' }]
@@ -45,7 +45,7 @@ function signOut() {
     <div class="nav__inner">
       <RouterLink to="/" class="nav__brand">
         <span class="nav__logo" aria-hidden="true">✦</span>
-        <span class="nav__name">Vibe<span class="gold-gradient-text">Club</span></span>
+        <span class="nav__name">Private<span class="gold-gradient-text">Community</span></span>
       </RouterLink>
       <div class="nav__right">
         <span v-if="isAuthenticated && user" class="nav__user" :title="user.email">
@@ -113,16 +113,18 @@ function signOut() {
 }
 
 .nav__logo {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 36px;
   height: 36px;
   border-radius: 12px;
+  flex-shrink: 0;
   background: linear-gradient(145deg, #3a3a3c, #1e1e1f);
   border: 1px solid var(--tg-border);
   color: var(--tg-gold);
   font-size: 1rem;
+  line-height: 0;
 }
 
 .nav__name {
@@ -189,6 +191,7 @@ function signOut() {
 .nav__link--active {
   color: var(--tg-text);
   background: var(--tg-accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tg-accent) 25%, transparent);
 }
 
 .nav__dot {

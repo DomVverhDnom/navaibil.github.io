@@ -7,7 +7,7 @@
 module.exports = {
   apps: [
     {
-      name: 'vibetelegram',
+      name: 'yasozdal',
       cwd: __dirname,
       script: 'server/index.js',
       instances: 1,
